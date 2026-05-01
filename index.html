@@ -589,6 +589,229 @@ body::before {
 .footer strong { color: var(--ink-dim); font-weight: 500; }
 
 /* ═══════════════════════════════════════════════════════════════
+   PREVIEW DOS SLIDES (passo 02)
+   ═══════════════════════════════════════════════════════════════ */
+.preview {
+  margin-top: 32px;
+  display: none;
+}
+.preview.is-visible { display: block; animation: panelIn 0.4s ease; }
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+.preview-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--safety);
+  text-transform: uppercase;
+}
+.preview-stats {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.preview-stats strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* Grid de cards */
+.slides-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.slide-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+.slide-card:hover { border-color: var(--line-strong); }
+
+.slide-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elevated);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.slide-card-num {
+  color: var(--safety);
+  font-weight: 700;
+}
+.slide-card-flags {
+  display: flex;
+  gap: 6px;
+}
+.flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+  border-radius: 2px;
+  background: var(--bg-base);
+  border: 1px solid var(--line-strong);
+  color: var(--ink-dim);
+}
+.flag.is-yt {
+  border-color: #FF4D4D40;
+  color: #FF6B6B;
+  background: #FF4D4D10;
+}
+.flag.is-img { color: var(--info); border-color: #60A5FA40; }
+.flag.is-notes { color: var(--safety); border-color: var(--safety-soft); }
+
+/* Mini-thumbnails */
+.slide-card-thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+  gap: 4px;
+  padding: 10px;
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--line);
+}
+.slide-card-thumbs:empty { display: none; }
+.slide-thumb {
+  aspect-ratio: 4 / 3;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  background-size: cover;
+  background-position: center;
+}
+
+.slide-card-body {
+  padding: 14px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.slide-title {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+}
+.slide-title.is-empty {
+  color: var(--ink-faint);
+  font-weight: 400;
+  font-style: italic;
+}
+.slide-text {
+  font-size: 12px;
+  color: var(--ink-dim);
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.slide-text:empty { display: none; }
+
+.slide-yt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.slide-yt-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: #FF6B6B;
+  text-decoration: none;
+  padding: 6px 8px;
+  background: #FF4D4D10;
+  border: 1px solid #FF4D4D30;
+  border-radius: 2px;
+  letter-spacing: 0.5px;
+}
+.slide-yt-link:hover { background: #FF4D4D20; color: #FF8888; }
+.slide-yt-link svg { flex-shrink: 0; }
+
+.slide-notes {
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-style: italic;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.slide-notes::before {
+  content: '📝 ';
+  font-style: normal;
+}
+
+.slide-card.is-error {
+  border-color: var(--danger);
+  background: #FF4D4D08;
+}
+.slide-card.is-error .slide-card-num { color: var(--danger); }
+
+/* Zona "gerar SCORM" final */
+.generate-zone {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--safety);
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.generate-info { flex: 1; min-width: 240px; }
+.generate-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--safety);
+  margin-bottom: 6px;
+}
+.generate-hint {
+  font-size: 14px;
+  color: var(--ink-dim);
+  line-height: 1.5;
+}
+.generate-hint strong { color: var(--ink); font-weight: 500; }
+
+.btn-large {
+  padding: 16px 32px;
+  font-size: 13px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    RESPONSIVO
    ═══════════════════════════════════════════════════════════════ */
 @media (max-width: 720px) {
@@ -721,19 +944,48 @@ body::before {
       <div class="log-block" id="logBlock"></div>
 
       <div class="actions">
-        <button class="btn btn-primary" id="btnConvert" disabled>
+        <button class="btn btn-primary" id="btnAnalyze" disabled>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
                stroke-linejoin="round">
-            <path d="m9 18 6-6-6-6"/>
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
           </svg>
-          Gerar SCORM
+          Analisar conteúdo
         </button>
         <button class="btn btn-ghost" id="btnReset">
           Trocar arquivo
         </button>
       </div>
 
+    </div>
+  </section>
+
+  <!-- ─── Preview dos slides (aparece após análise) ──────────────── -->
+  <section class="preview" id="preview">
+    <div class="preview-header">
+      <span class="preview-id">// 03 · CONTEÚDO EXTRAÍDO</span>
+      <span class="preview-stats" id="previewStats">—</span>
+    </div>
+
+    <div class="slides-grid" id="slidesGrid"></div>
+
+    <div class="generate-zone">
+      <div class="generate-info">
+        <div class="generate-title">Pacote SCORM 2004 4ed</div>
+        <div class="generate-hint" id="generateHint">
+          Pronto para empacotar. <strong>Clique abaixo para baixar o .zip</strong>.
+        </div>
+      </div>
+      <button class="btn btn-primary btn-large" id="btnGenerate" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+             stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Gerar pacote SCORM
+      </button>
     </div>
   </section>
 
