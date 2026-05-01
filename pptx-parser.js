@@ -343,8 +343,8 @@
     }
   }
 
-  // ─── Lê ordem dos slides (presentation.xml + rels) ────────────────
-  async function readSlideOrder(zip) {
+  // ─── Lê ordem dos slides + tamanho (presentation.xml + rels) ──────
+  async function readPresentationInfo(zip) {
     const presFile = zip.file('ppt/presentation.xml');
     if (!presFile) throw new Error('ppt/presentation.xml ausente');
     const presRelsFile = zip.file('ppt/_rels/presentation.xml.rels');
@@ -353,13 +353,11 @@
     const presDoc = parseXML(await presFile.async('string'));
     const relsDoc = parseXML(await presRelsFile.async('string'));
 
-    // Map rId → target
     const relMap = new Map();
     $$(relsDoc, 'Relationship').forEach((r) => {
       relMap.set(r.getAttribute('Id'), r.getAttribute('Target'));
     });
 
-    // <p:sldIdLst><p:sldId r:id="rIdN"/></p:sldIdLst> em ordem
     const sldIds = $$(presDoc, 'sldId');
     const slidePaths = [];
     sldIds.forEach((sld) => {
@@ -373,7 +371,14 @@
         slidePaths.push(resolvePath('ppt/presentation.xml', target));
       }
     });
-    return slidePaths;
+
+    // Tamanho do slide em EMU. Defaults: 9144000 x 6858000 (16:9 widescreen)
+    const sldSz = $1(presDoc, 'sldSz');
+    const slideSize = sldSz
+      ? { cx: +sldSz.getAttribute('cx') || 9144000, cy: +sldSz.getAttribute('cy') || 6858000 }
+      : { cx: 9144000, cy: 6858000 };
+
+    return { slidePaths, slideSize };
   }
 
   // ─── API pública ───────────────────────────────────────────────────
@@ -392,9 +397,11 @@
       const title = await readDeckTitle(zip);
       if (title) log('info', `Título da apresentação: "${title}"`);
 
-      // 2. Ordem dos slides
-      const slidePaths = await readSlideOrder(zip);
+      // 2. Ordem e tamanho dos slides
+      const presInfo = await readPresentationInfo(zip);
+      const { slidePaths, slideSize } = presInfo;
       log('ok', `Ordem de ${slidePaths.length} slide(s) determinada.`);
+      log('info', `Tamanho do slide: ${(slideSize.cx/914400).toFixed(2)}" × ${(slideSize.cy/914400).toFixed(2)}"`);
 
       // 3. Parse de cada slide
       const slides = [];
@@ -456,6 +463,7 @@
 
       return {
         title,
+        slideSize,
         slideCount: slides.length,
         totalWords,
         totalYouTube,

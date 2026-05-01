@@ -157,9 +157,52 @@
 
   btnGenerate.addEventListener('click', () => {
     if (!state.parsed) return;
-    log('warn', 'Geração SCORM ainda não implementada (passo 3 do MVP).');
-    log('info', 'No próximo passo: imsmanifest.xml + player + .zip baixável.');
+    runGenerate();
   });
+
+  // ─── PASSO 3: Gerar pacote SCORM ─────────────────────────────────
+  async function runGenerate() {
+    if (typeof window.SCORMGenerator === 'undefined') {
+      log('err', 'SCORMGenerator não carregado.');
+      return;
+    }
+    btnGenerate.disabled = true;
+    setStatus('GERANDO SCORM', 'is-busy');
+    log('info', 'Iniciando geração do pacote SCORM 2004 4ed…');
+
+    try {
+      const opts = {
+        title: state.parsed.title || (state.file && state.file.name.replace(/\.pptx$/i, '')) || 'Apresentação TONOFF',
+      };
+      const blob = await window.SCORMGenerator.generate(state.parsed, opts, log);
+
+      // Dispara download
+      const baseName = (state.file ? state.file.name.replace(/\.pptx$/i, '') : 'tonoff-scorm');
+      const filename = baseName.replace(/[^a-zA-Z0-9_-]/g, '_') + '_SCORM.zip';
+      downloadBlob(blob, filename);
+      log('ok', `Download iniciado: ${filename}`);
+      setStatus('SCORM GERADO');
+    } catch (err) {
+      log('err', 'Falha ao gerar SCORM: ' + err.message);
+      console.error(err);
+      setStatus('FALHA NA GERAÇÃO', 'is-error');
+    } finally {
+      btnGenerate.disabled = false;
+    }
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
 
   // ─── Pipeline upload + quick scan (passo 1 — inalterado) ───────────
   async function handleFile(file) {
@@ -279,10 +322,29 @@
     ];
     previewStats.innerHTML = bits.join(' · ');
 
+    // Detecta imagens "decorativas" (logos repetidas) — aparecem em ≥ 50% dos slides
+    const imageOccurrences = new Map();
+    parsed.slides.forEach((s) => {
+      const seen = new Set();
+      s.images.forEach((img) => {
+        if (seen.has(img.path)) return;
+        seen.add(img.path);
+        imageOccurrences.set(img.path, (imageOccurrences.get(img.path) || 0) + 1);
+      });
+    });
+    const decorativeThreshold = Math.max(2, Math.ceil(parsed.slides.length * 0.5));
+    const decorativeImages = new Set();
+    imageOccurrences.forEach((count, path) => {
+      if (count >= decorativeThreshold) decorativeImages.add(path);
+    });
+    if (decorativeImages.size > 0) {
+      log('info', `Identificadas ${decorativeImages.size} imagem(ns) decorativas (logos/rodapés).`);
+    }
+
     // Cards
     slidesGrid.innerHTML = '';
     parsed.slides.forEach((slide) => {
-      slidesGrid.appendChild(buildSlideCard(slide, parsed.mediaFiles));
+      slidesGrid.appendChild(buildSlideCard(slide, parsed.mediaFiles, parsed.slideSize, decorativeImages));
     });
 
     // Zona de geração
@@ -300,13 +362,17 @@
     setTimeout(() => preview.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
   }
 
-  function buildSlideCard(slide, mediaFiles) {
+  function buildSlideCard(slide, mediaFiles, slideSize, decorativeImages) {
     const card = document.createElement('article');
     card.className = 'slide-card' + (slide.error ? ' is-error' : '');
 
     // Header com número e flags
     const flags = [];
-    if (slide.images.length) flags.push(`<span class="flag is-img">${slide.images.length} IMG</span>`);
+    const contentImages = slide.images.filter((img) => !decorativeImages.has(img.path));
+    const decoCount = slide.images.length - contentImages.length;
+
+    if (contentImages.length) flags.push(`<span class="flag is-img">${contentImages.length} IMG</span>`);
+    if (decoCount > 0) flags.push(`<span class="flag is-deco" title="Imagens repetidas em vários slides (provável logo/rodapé)">${decoCount} LOGO</span>`);
     if (slide.youtubeVideos.length) flags.push(`<span class="flag is-yt">▶ ${slide.youtubeVideos.length} YT</span>`);
     if (slide.notes) flags.push(`<span class="flag is-notes">📝</span>`);
 
@@ -318,26 +384,11 @@
       </header>
     `;
 
-    // Thumbnails (se tiver imagens)
-    if (slide.images.length > 0) {
-      const thumbs = document.createElement('div');
-      thumbs.className = 'slide-card-thumbs';
-      slide.images.forEach((img) => {
-        const blob = mediaFiles[img.path];
-        const thumb = document.createElement('div');
-        thumb.className = 'slide-thumb';
-        if (blob) {
-          const url = URL.createObjectURL(blob);
-          state.objectURLs.push(url);
-          thumb.style.backgroundImage = `url("${url}")`;
-        }
-        thumb.title = img.path;
-        thumbs.appendChild(thumb);
-      });
-      card.appendChild(thumbs);
-    }
+    // Miniatura sintética 16:9 (ou proporção real do slide)
+    const thumb = buildSlideThumbnail(slide, contentImages, mediaFiles, slideSize);
+    card.appendChild(thumb);
 
-    // Body
+    // Body com info textual
     const body = document.createElement('div');
     body.className = 'slide-card-body';
 
@@ -365,7 +416,6 @@
       body.appendChild(txt);
     }
 
-    // Vídeos YouTube
     if (slide.youtubeVideos.length > 0) {
       const list = document.createElement('div');
       list.className = 'slide-yt-list';
@@ -379,13 +429,12 @@
           `<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
             <path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.4.5A3 3 0 0 0 .5 6.2C0 8.1 0 12 0 12s0 3.9.5 5.8a3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1c.5-1.9.5-5.8.5-5.8s0-3.9-.5-5.8zM9.6 15.6V8.4l6.2 3.6-6.2 3.6z"/>
           </svg>` +
-          `<span>${yt.videoId} · ${yt.source}</span>`;
+          `<span>${yt.videoId}</span>`;
         list.appendChild(a);
       });
       body.appendChild(list);
     }
 
-    // Notas
     if (slide.notes) {
       const n = document.createElement('div');
       n.className = 'slide-notes';
@@ -395,6 +444,72 @@
 
     card.appendChild(body);
     return card;
+  }
+
+  // ─── Miniatura SVG sintética 16:9 ──────────────────────────────────
+  // Renderiza o slide como ele será visto no SCORM final (proporção real)
+  function buildSlideThumbnail(slide, contentImages, mediaFiles, slideSize) {
+    const wrap = document.createElement('div');
+    wrap.className = 'slide-thumbnail';
+
+    // Aspect ratio real do slide (default 16:9)
+    const ratio = (slideSize && slideSize.cx && slideSize.cy)
+      ? (slideSize.cy / slideSize.cx) * 100
+      : 56.25;
+    wrap.style.paddingBottom = ratio.toFixed(2) + '%';
+
+    const inner = document.createElement('div');
+    inner.className = 'slide-thumbnail-inner';
+
+    // Caso 1: tem vídeo do YouTube → mostra "letterbox" com play button
+    if (slide.youtubeVideos.length > 0) {
+      const yt = slide.youtubeVideos[0];
+      inner.innerHTML = `
+        <div class="thumb-yt">
+          <img class="thumb-yt-poster" src="https://i.ytimg.com/vi/${yt.videoId}/hqdefault.jpg"
+               alt="" loading="lazy" onerror="this.style.display='none'">
+          <div class="thumb-yt-play">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </div>
+        </div>
+      `;
+    }
+    // Caso 2: tem imagem de conteúdo → mostra a maior
+    else if (contentImages.length > 0) {
+      // Pega a maior por área (cx*cy em EMU); se EMU não disponível, primeira
+      let main = contentImages[0];
+      if (main.cx && main.cy) {
+        main = contentImages.reduce((best, img) =>
+          ((img.cx || 0) * (img.cy || 0)) > ((best.cx || 0) * (best.cy || 0)) ? img : best,
+          contentImages[0]
+        );
+      }
+      const blob = mediaFiles[main.path];
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        state.objectURLs.push(url);
+        inner.innerHTML = `<img class="thumb-image" src="${url}" alt="" loading="lazy">`;
+      }
+    }
+    // Caso 3: só texto → mostra layout textual fiel
+    else {
+      const titleHtml = slide.title
+        ? `<div class="thumb-title">${escapeHtml(slide.title)}</div>`
+        : '';
+      const bodyHtml = slide.paragraphs.length
+        ? `<div class="thumb-body">${slide.paragraphs.slice(0, 4).map(p =>
+            `<div class="thumb-line">${escapeHtml(p.slice(0, 80))}</div>`
+          ).join('')}</div>`
+        : '';
+      if (titleHtml || bodyHtml) {
+        inner.innerHTML = `<div class="thumb-text-layout">${titleHtml}${bodyHtml}</div>`;
+      } else {
+        inner.innerHTML = `<div class="thumb-empty">Slide vazio</div>`;
+      }
+    }
+
+    wrap.appendChild(inner);
+    return wrap;
   }
 
   // ─── Debug ─────────────────────────────────────────────────────────
