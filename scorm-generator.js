@@ -1,32 +1,27 @@
 /* ═══════════════════════════════════════════════════════════════════════
-   SCORM-GENERATOR.JS · Empacotador SCORM 2004 4th Edition
+   SCORM-GENERATOR.JS · Empacotador SCORM 2004 4ed (v2)
    ─────────────────────────────────────────────────────────────────────
-   Recebe a estrutura do PPTXParser e gera um .zip baixável com:
-     imsmanifest.xml
-     index.html        ← player principal (autocontido)
-     player.css
-     player.js         ← navegação + comunicação API_1484_11
-     slides.json       ← dados estruturados
-     media/            ← imagens copiadas com nomes únicos
+   Mudanças nesta versão:
+   ✓ Layout 16:9 fiel — slides com .slide-stage absoluto em px reais (1280×720)
+   ✓ Auto-scale via ResizeObserver pra responsividade
+   ✓ YouTube como THUMBNAIL CLICÁVEL (resolve "Erro 153" em iframe blob:)
+     → postMessage({__scormOpenURL}) pro parent + fallback window.open
+   ✓ CSP meta tag autorizando youtube/youtube-nocookie/ytimg
+   ✓ Posicionamento absoluto preservando coordenadas EMU originais
 
    COMPATÍVEL COM:
-     - Plataforma TONOFF (detecta launchURL via <resource href>)
+     - Plataforma TONOFF (já intercepta __scormOpenURL e abre modal próprio)
      - SCORM Cloud, Moodle, Blackboard
-
-   PADRÕES SEGUIDOS (lições aprendidas com iSpring):
-     ✓ Vídeos YouTube via iframe SIMPLES /embed/{id}
-       SEM enablejsapi, SEM origin, SEM wrappers proprietários
-     ✓ Tudo HTTPS — zero Mixed Content
-     ✓ Estrutura plana — index.html na raiz
-     ✓ Reporta progresso real via cmi.progress_measure
    ═══════════════════════════════════════════════════════════════════════ */
 
 (function () {
   'use strict';
 
   // ─── Helpers ───────────────────────────────────────────────────────
+  const EMU_PER_PX = 9525;
+  function emuToPx(emu) { return Math.round((emu || 0) / EMU_PER_PX); }
+
   function uuid() {
-    // RFC4122-ish, suficiente pra identifier
     return 'TONOFF-' + Date.now().toString(36) + '-' +
       Math.random().toString(36).slice(2, 10).toUpperCase();
   }
@@ -37,32 +32,31 @@
     }[c]));
   }
 
-  // Sanitiza nome de arquivo pra ASCII seguro (preserva extensão)
+  function escapeHtmlAttr(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
   function safeFilename(originalPath) {
     const name = originalPath.split('/').pop();
     const dot = name.lastIndexOf('.');
     const base = dot > 0 ? name.slice(0, dot) : name;
     const ext = dot > 0 ? name.slice(dot) : '';
     const safe = base
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // remove diacríticos
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .slice(0, 60);
     return (safe || 'file') + ext.toLowerCase();
   }
 
   // ─── Manifest XML ──────────────────────────────────────────────────
-  function buildManifest(parsed, opts, mediaList) {
+  function buildManifest(parsed, opts, fileList) {
     const id = opts.identifier || uuid();
     const title = escapeXml(opts.title || parsed.title || 'Apresentação TONOFF');
-    const lang = opts.language || 'pt-BR';
 
-    const fileEntries = [
-      'index.html',
-      'player.css',
-      'player.js',
-      'slides.json',
-      ...mediaList.map((m) => m.scormPath),
-    ].map((p) => `      <file href="${escapeXml(p)}"/>`).join('\n');
+    const fileEntries = fileList
+      .map((p) => `      <file href="${escapeXml(p)}"/>`).join('\n');
 
     return `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <manifest identifier="${escapeXml(id)}" version="1.0"
@@ -98,47 +92,111 @@ ${fileEntries}
 </manifest>`;
   }
 
-  // ─── slides.json ───────────────────────────────────────────────────
+  // ─── slides.json — agora inclui ELEMENTS posicionados ─────────────
   function buildSlidesData(parsed, mediaMap) {
-    return parsed.slides.map((s) => ({
-      index: s.index,
-      title: s.title || '',
-      paragraphs: s.paragraphs || [],
-      images: (s.images || []).map((img) => ({
-        src: mediaMap[img.path] || null,   // caminho dentro do SCORM (ex: media/image1.png)
-        x: img.x, y: img.y, cx: img.cx, cy: img.cy,
-      })).filter((i) => i.src),
-      youtubeVideos: (s.youtubeVideos || []).map((yt) => ({
-        videoId: yt.videoId,
-        url: 'https://www.youtube.com/embed/' + yt.videoId,
-      })),
-      notes: s.notes || '',
-    }));
+    return parsed.slides.map((s) => {
+      const elements = (s.elements || []).map((el) => {
+        const base = {
+          type: el.type,
+          x: emuToPx(el.x),
+          y: emuToPx(el.y),
+          w: emuToPx(el.cx),
+          h: emuToPx(el.cy),
+        };
+        if (el.type === 'text') {
+          return {
+            ...base,
+            isTitle: !!el.isTitle,
+            anchor: el.anchor || 't',
+            paragraphs: (el.paragraphs || []).map((p) => ({
+              text: p.text || '',
+              fontSize: p.fontSize || null,
+              bold: !!p.bold,
+              italic: !!p.italic,
+              color: p.color || null,
+              align: p.align || 'l',
+              isBullet: !!p.isBullet,
+              indent: p.indent || 0,
+            })),
+          };
+        }
+        if (el.type === 'image') {
+          return { ...base, src: mediaMap[el.path] || null };
+        }
+        if (el.type === 'youtube') {
+          return {
+            ...base,
+            videoId: el.videoId,
+            url: 'https://www.youtube.com/watch?v=' + el.videoId,
+            thumbnail: el.thumbnailPath ? (mediaMap[el.thumbnailPath] || null) : null,
+          };
+        }
+        if (el.type === 'shape') {
+          return { ...base, fill: el.fill || null };
+        }
+        return base;
+      }).filter((el) => el.type !== 'image' || el.src); // remove imagem sem src
+
+      // YouTube de hyperlinks (sem posição) entra como elemento extra no fim
+      const positionedYtIds = new Set(
+        elements.filter((e) => e.type === 'youtube').map((e) => e.videoId)
+      );
+      (s.youtubeVideos || []).forEach((yt) => {
+        if (!positionedYtIds.has(yt.videoId)) {
+          elements.push({
+            type: 'youtube',
+            x: 0, y: 0, w: 0, h: 0, // sem posição → renderizado como bloco no final
+            videoId: yt.videoId,
+            url: 'https://www.youtube.com/watch?v=' + yt.videoId,
+            thumbnail: null,
+            unpositioned: true,
+          });
+        }
+      });
+
+      return {
+        index: s.index,
+        title: s.title || '',
+        bgColor: s.bgColor || null,
+        elements,
+        notes: s.notes || '',
+      };
+    });
   }
 
   // ─── PLAYER HTML ───────────────────────────────────────────────────
-  function buildPlayerHTML(parsed, opts) {
+  // Inclui CSP meta tag pra autorizar embed do YouTube
+  function buildPlayerHTML(parsed, opts, slideSize) {
     const title = escapeXml(opts.title || parsed.title || 'Apresentação TONOFF');
+    const stageW = emuToPx(slideSize.cx);
+    const stageH = emuToPx(slideSize.cy);
+
     return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' blob: data:; frame-src 'self' blob: data: https://www.youtube.com https://www.youtube-nocookie.com https://i.ytimg.com https://s.ytimg.com https://player.vimeo.com; img-src 'self' blob: data: https: http:; media-src 'self' blob: data: https:; connect-src 'self' blob: data:; script-src 'self' 'unsafe-inline';">
 <title>${title}</title>
 <link rel="stylesheet" href="player.css">
+<script>
+// Stage size injetado no HTML (em px, derivado do PPTX)
+window.__STAGE_W__ = ${stageW};
+window.__STAGE_H__ = ${stageH};
+</script>
 </head>
 <body>
 <div id="app" class="app">
 
   <header class="topbar">
-    <div class="topbar-title" id="deckTitle">${title}</div>
-    <div class="topbar-progress">
-      <span id="slideCounter">— / —</span>
-    </div>
+    <div class="topbar-title">${title}</div>
+    <div class="topbar-progress" id="slideCounter">— / —</div>
   </header>
 
-  <main class="stage" id="stage">
-    <div class="loader">Carregando…</div>
+  <main class="viewport" id="viewport">
+    <div class="stage" id="stage" style="width:${stageW}px;height:${stageH}px;">
+      <div class="loader">Carregando…</div>
+    </div>
   </main>
 
   <footer class="navbar">
@@ -171,14 +229,13 @@ ${fileEntries}
 
   // ─── PLAYER CSS ────────────────────────────────────────────────────
   function buildPlayerCSS() {
-    return `/* TONOFF SCORM Player */
+    return `/* TONOFF SCORM Player v2 — layout 16:9 fiel ao PPTX */
 *,*::before,*::after { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; height: 100%; }
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
 body {
   background: #0A0E14;
   color: #E8EDF5;
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  overflow: hidden;
 }
 
 .app {
@@ -193,14 +250,15 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 24px;
+  padding: 10px 20px;
   background: #11161F;
   border-bottom: 1px solid #2A3447;
   flex-shrink: 0;
+  min-height: 44px;
 }
 .topbar-title {
   font-weight: 600;
-  font-size: 15px;
+  font-size: 14px;
   color: #FFB800;
   letter-spacing: 0.3px;
   white-space: nowrap;
@@ -215,149 +273,157 @@ body {
   letter-spacing: 1px;
 }
 
-/* ─── Stage (área do slide) ─────────────────────────────────── */
-.stage {
+/* ─── Viewport (área externa que escala) ─────────────────────── */
+.viewport {
   flex: 1;
-  overflow-y: auto;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 32px 24px;
+  position: relative;
+  overflow: hidden;
   background: #0A0E14;
-  scroll-behavior: smooth;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.stage::-webkit-scrollbar { width: 8px; }
-.stage::-webkit-scrollbar-track { background: #11161F; }
-.stage::-webkit-scrollbar-thumb { background: #3D4A63; border-radius: 4px; }
 
-.slide {
-  width: 100%;
-  max-width: 960px;
+/* Stage = slide com dimensões REAIS (1280×720 etc).
+   A escala é feita por CSS variable --scale ajustada pelo JS via ResizeObserver. */
+.stage {
+  position: absolute;
   background: #FFFFFF;
   color: #1A1A1A;
-  border-radius: 4px;
-  padding: 48px 56px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-  animation: slideIn 0.3s ease;
-  min-height: 540px;
-}
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-.slide-title {
-  font-size: 32px;
-  font-weight: 700;
-  color: #1A1A1A;
-  margin: 0 0 24px 0;
-  line-height: 1.2;
-  border-bottom: 3px solid #FFB800;
-  padding-bottom: 12px;
-}
-.slide-paragraph {
-  font-size: 17px;
-  line-height: 1.6;
-  margin: 0 0 14px 0;
-  color: #2A2A2A;
-  white-space: pre-wrap;
-}
-.slide-paragraph:last-child { margin-bottom: 0; }
-
-.slide-images {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
-  margin: 24px 0;
-}
-.slide-images.is-single { grid-template-columns: 1fr; }
-.slide-image {
-  width: 100%;
-  border: 1px solid #E0E0E0;
-  background: #F8F8F8;
-}
-.slide-image img {
-  width: 100%;
-  height: auto;
-  display: block;
-}
-
-.slide-video {
-  margin: 24px 0;
-  position: relative;
-  padding-bottom: 56.25%;  /* 16:9 */
-  height: 0;
   overflow: hidden;
-  background: #000;
-  border-radius: 4px;
+  transform-origin: center center;
+  transform: translate(-50%, -50%) scale(var(--scale, 1));
+  left: 50%;
+  top: 50%;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
 }
-.slide-video iframe {
+
+/* Animação de entrada do slide */
+.stage.is-changing { opacity: 0; }
+.stage { transition: opacity 0.2s ease; }
+
+/* ─── Elementos do slide (todos absolute, em px do PPTX) ────── */
+.el {
   position: absolute;
-  top: 0; left: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-}
-.slide-video-caption {
-  font-size: 13px;
-  color: #666;
-  margin-top: 8px;
-  text-align: center;
+  box-sizing: border-box;
 }
 
-.slide-notes {
-  margin-top: 32px;
-  padding: 16px 20px;
-  background: #FFF8E1;
-  border-left: 4px solid #FFB800;
-  font-size: 14px;
-  color: #5A4A1A;
-  line-height: 1.5;
-  border-radius: 2px;
-  white-space: pre-wrap;
+.el-text {
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-.slide-notes-label {
-  display: block;
-  font-weight: 700;
+.el-text.anchor-t { justify-content: flex-start; }
+.el-text.anchor-ctr { justify-content: center; }
+.el-text.anchor-b { justify-content: flex-end; }
+.el-text p {
+  margin: 0;
+  line-height: 1.25;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.el-text p + p { margin-top: 0.3em; }
+
+.el-image {
+  object-fit: contain;
+  background: transparent;
+}
+
+.el-shape {
+  /* faixas/retângulos coloridos decorativos */
+}
+
+/* YouTube como thumbnail clicável (evita Erro 153 em iframe blob:) */
+.el-youtube {
+  background: #000 center/cover no-repeat;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: filter 0.15s ease;
+}
+.el-youtube:hover { filter: brightness(1.1); }
+.el-youtube .yt-play {
+  width: 68px; height: 48px;
+  background: rgba(220, 38, 38, 0.92);
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+  transition: transform 0.15s ease, background 0.15s ease;
+  pointer-events: none;
+}
+.el-youtube:hover .yt-play {
+  background: rgba(220, 38, 38, 1);
+  transform: scale(1.05);
+}
+.el-youtube .yt-play svg { width: 24px; height: 24px; fill: #FFFFFF; }
+.el-youtube .yt-label {
+  position: absolute;
+  bottom: 8px; left: 8px;
+  background: rgba(0,0,0,0.7);
+  color: white;
   font-size: 11px;
-  letter-spacing: 1.5px;
-  text-transform: uppercase;
-  color: #B07E00;
-  margin-bottom: 6px;
+  padding: 3px 8px;
+  border-radius: 2px;
+  letter-spacing: 0.5px;
+  pointer-events: none;
 }
 
-.slide-empty {
-  color: #999;
-  font-style: italic;
-  text-align: center;
-  padding: 80px 0;
+/* YouTube extra (vídeos sem posição — vindos de hyperlink em texto) */
+.el-youtube.is-floating {
+  position: relative;
+  width: 480px; height: 270px;
+  margin: 16px auto;
+  display: flex;
 }
 
 .loader {
-  text-align: center;
-  color: #8A95AB;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #999;
   font-size: 14px;
   letter-spacing: 1px;
   text-transform: uppercase;
-  padding: 80px 0;
+}
+
+.slide-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #aaa;
+  font-style: italic;
+  font-size: 18px;
+}
+
+/* Notas (renderizadas FORA do stage, abaixo do viewport) — ficam ocultas no player default */
+.slide-notes-overlay {
+  display: none;
 }
 
 /* ─── Navbar ─────────────────────────────────────────────────── */
 .navbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 24px;
+  gap: 14px;
+  padding: 10px 20px;
   background: #11161F;
   border-top: 1px solid #2A3447;
   flex-shrink: 0;
+  min-height: 56px;
 }
 
 .nav-btn {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 18px;
+  padding: 9px 16px;
   background: transparent;
   color: #E8EDF5;
   border: 1px solid #3D4A63;
@@ -405,28 +471,23 @@ body {
   transition: width 0.3s ease;
 }
 
-/* ─── Responsivo ─────────────────────────────────────────────── */
+/* ─── Mobile ─────────────────────────────────────────────────── */
 @media (max-width: 640px) {
-  .topbar { padding: 10px 14px; }
-  .topbar-title { font-size: 13px; max-width: 60%; }
-  .stage { padding: 16px 12px; }
-  .slide { padding: 24px 20px; min-height: auto; }
-  .slide-title { font-size: 22px; margin-bottom: 16px; }
-  .slide-paragraph { font-size: 15px; }
-  .navbar { padding: 10px 12px; gap: 8px; }
-  .nav-btn { padding: 8px 12px; font-size: 12px; }
-  .nav-btn span { display: none; }   /* só ícone no mobile */
+  .topbar { padding: 8px 12px; min-height: 38px; }
+  .topbar-title { font-size: 12px; max-width: 60%; }
+  .navbar { padding: 8px 10px; gap: 8px; min-height: 48px; }
+  .nav-btn { padding: 7px 10px; font-size: 12px; }
+  .nav-btn span { display: none; }
 }`;
   }
 
   // ─── PLAYER JS ─────────────────────────────────────────────────────
-  // Comunicação SCORM 2004 (API_1484_11) + navegação entre slides
   function buildPlayerJS() {
-    return `/* TONOFF SCORM Player · Runtime */
+    return `/* TONOFF SCORM Player v2 · Runtime */
 (function () {
   'use strict';
 
-  // ─── Localiza API SCORM 2004 (API_1484_11) ───────────────────────
+  // ─── Localiza API SCORM 2004 ─────────────────────────────────────
   function findAPI() {
     let win = window;
     let depth = 0;
@@ -479,83 +540,169 @@ body {
   let startTime = Date.now();
 
   // ─── Refs ────────────────────────────────────────────────────────
+  const viewport = document.getElementById('viewport');
   const stage = document.getElementById('stage');
   const counter = document.getElementById('slideCounter');
   const fill = document.getElementById('progressFill');
   const btnPrev = document.getElementById('btnPrev');
   const btnNext = document.getElementById('btnNext');
 
-  // ─── Renderização do slide ──────────────────────────────────────
+  const STAGE_W = window.__STAGE_W__ || 1280;
+  const STAGE_H = window.__STAGE_H__ || 720;
+
+  // ─── Auto-scale do stage ─────────────────────────────────────────
+  function updateScale() {
+    const padding = 24; // respiro nas bordas
+    const vpW = viewport.clientWidth - padding;
+    const vpH = viewport.clientHeight - padding;
+    if (vpW <= 0 || vpH <= 0) return;
+    const scaleW = vpW / STAGE_W;
+    const scaleH = vpH / STAGE_H;
+    const scale = Math.min(scaleW, scaleH);
+    stage.style.setProperty('--scale', scale.toFixed(4));
+  }
+
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(updateScale).observe(viewport);
+  } else {
+    window.addEventListener('resize', updateScale);
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────
   function escapeHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  function renderSlide(i) {
-    const s = slides[i];
-    if (!s) {
-      stage.innerHTML = '<div class="slide"><p class="slide-empty">Slide não encontrado.</p></div>';
-      return;
-    }
-    const parts = [];
-    parts.push('<article class="slide">');
+  // ─── YouTube: abre vídeo externamente (resolve "Erro 153") ──────
+  // Estratégia: postMessage pro parent (TONOFF intercepta e abre modal),
+  // com fallback de abrir nova aba após 250ms se ninguém respondeu.
+  window.__abrirVideoYT = function (videoId) {
+    const url = 'https://www.youtube.com/watch?v=' + videoId;
+    let ackReceived = false;
 
-    if (s.title) {
-      parts.push('<h1 class="slide-title">' + escapeHtml(s.title) + '</h1>');
+    // Listener de ACK opcional — plataformas podem responder
+    const ackListener = function (ev) {
+      if (ev.data && ev.data.__scormOpenURL_ack) {
+        ackReceived = true;
+        window.removeEventListener('message', ackListener);
+      }
+    };
+    window.addEventListener('message', ackListener);
+
+    // PostMessage pro parent (qualquer profundidade)
+    try {
+      let win = window.parent;
+      let depth = 0;
+      while (win && depth < 12) {
+        try {
+          win.postMessage({ __scormOpenURL: true, url: url, videoId: videoId }, '*');
+        } catch (e) {}
+        if (win === win.parent) break;
+        win = win.parent;
+        depth++;
+      }
+      if (window.opener) {
+        try { window.opener.postMessage({ __scormOpenURL: true, url: url, videoId: videoId }, '*'); }
+        catch (e) {}
+      }
+    } catch (e) { console.warn('postMessage falhou:', e); }
+
+    // Fallback: nova aba se ninguém responder em 250ms
+    setTimeout(function () {
+      window.removeEventListener('message', ackListener);
+      if (!ackReceived) {
+        try { window.open(url, '_blank', 'noopener,noreferrer'); }
+        catch (e) { console.warn('window.open falhou:', e); }
+      }
+    }, 250);
+  };
+
+  // ─── Renderização de elementos posicionados ─────────────────────
+  function renderElement(el) {
+    const css = 'left:' + el.x + 'px;top:' + el.y + 'px;width:' + el.w + 'px;height:' + el.h + 'px;';
+
+    if (el.type === 'text') {
+      const anchorClass = 'anchor-' + (el.anchor || 't');
+      const inner = (el.paragraphs || []).map(function (p) {
+        const styles = [];
+        if (p.fontSize) styles.push('font-size:' + p.fontSize + 'pt');
+        if (p.bold) styles.push('font-weight:700');
+        if (p.italic) styles.push('font-style:italic');
+        if (p.color) styles.push('color:' + p.color);
+        const alignMap = { l: 'left', ctr: 'center', r: 'right', just: 'justify' };
+        styles.push('text-align:' + (alignMap[p.align] || 'left'));
+        const text = p.isBullet ? '• ' + p.text : p.text;
+        return '<p style="' + styles.join(';') + '">' + escapeHtml(text) + '</p>';
+      }).join('');
+      return '<div class="el el-text ' + anchorClass + '" style="' + css + '">' + inner + '</div>';
     }
 
-    // Imagens (antes dos parágrafos pra leitura natural)
-    if (s.images && s.images.length > 0) {
-      const cls = s.images.length === 1 ? 'is-single' : '';
-      parts.push('<div class="slide-images ' + cls + '">');
-      s.images.forEach(function (img) {
-        parts.push('<div class="slide-image"><img src="' + escapeHtml(img.src) + '" alt=""></div>');
-      });
-      parts.push('</div>');
+    if (el.type === 'image') {
+      return '<img class="el el-image" style="' + css + '" src="' + escapeHtml(el.src) + '" alt="">';
     }
 
-    // Parágrafos
-    if (s.paragraphs && s.paragraphs.length > 0) {
-      s.paragraphs.forEach(function (p) {
-        parts.push('<p class="slide-paragraph">' + escapeHtml(p) + '</p>');
-      });
-    }
-
-    // Vídeos do YouTube — IFRAME SIMPLES, sem enablejsapi (evita Erro 153)
-    if (s.youtubeVideos && s.youtubeVideos.length > 0) {
-      s.youtubeVideos.forEach(function (yt) {
-        parts.push(
-          '<div class="slide-video">' +
-            '<iframe src="' + escapeHtml(yt.url) + '" ' +
-              'title="YouTube video ' + escapeHtml(yt.videoId) + '" ' +
-              'allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" ' +
-              'allowfullscreen referrerpolicy="strict-origin-when-cross-origin">' +
-            '</iframe>' +
-          '</div>'
-        );
-      });
-    }
-
-    // Notas (visíveis pro aluno; útil em treinamento)
-    if (s.notes) {
-      parts.push(
-        '<div class="slide-notes">' +
-          '<span class="slide-notes-label">Notas do instrutor</span>' +
-          escapeHtml(s.notes) +
+    if (el.type === 'youtube') {
+      const isFloating = el.unpositioned || (!el.w && !el.h);
+      const cls = 'el el-youtube' + (isFloating ? ' is-floating' : '');
+      const finalCss = isFloating ? '' : css;
+      // Thumbnail: usa imagem embutida se houver, senão pega do YouTube CDN
+      const thumb = el.thumbnail || ('https://i.ytimg.com/vi/' + el.videoId + '/hqdefault.jpg');
+      const bgStyle = 'background-image:url(\\'' + escapeHtml(thumb) + '\\');';
+      return (
+        '<div class="' + cls + '" style="' + finalCss + bgStyle + '" ' +
+             'role="button" tabindex="0" ' +
+             'onclick="window.__abrirVideoYT(\\'' + escapeHtml(el.videoId) + '\\')" ' +
+             'onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();window.__abrirVideoYT(\\'' + escapeHtml(el.videoId) + '\\');}">' +
+          '<button type="button" class="yt-play" aria-label="Reproduzir vídeo no YouTube">' +
+            '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' +
+          '</button>' +
+          '<span class="yt-label">▶ ' + escapeHtml(el.videoId) + '</span>' +
         '</div>'
       );
     }
 
-    if (!s.title && (!s.paragraphs || s.paragraphs.length === 0) &&
-        (!s.images || s.images.length === 0) &&
-        (!s.youtubeVideos || s.youtubeVideos.length === 0)) {
-      parts.push('<p class="slide-empty">(slide sem conteúdo identificável)</p>');
+    if (el.type === 'shape') {
+      const bg = el.fill ? 'background:' + el.fill + ';' : '';
+      return '<div class="el el-shape" style="' + css + bg + '"></div>';
     }
 
-    parts.push('</article>');
-    stage.innerHTML = parts.join('');
-    stage.scrollTop = 0;
+    return '';
+  }
+
+  // ─── Renderização de slide completo ─────────────────────────────
+  function renderSlide(i) {
+    const s = slides[i];
+    if (!s) {
+      stage.innerHTML = '<div class="slide-empty">Slide não encontrado.</div>';
+      return;
+    }
+    const positioned = (s.elements || []).filter(function (e) { return !e.unpositioned; });
+    const floating = (s.elements || []).filter(function (e) { return e.unpositioned; });
+
+    let html = positioned.map(renderElement).join('');
+
+    // Vídeos do YouTube vindos de hyperlinks (sem posição) → centraliza
+    if (floating.length > 0) {
+      html += floating.map(renderElement).join('');
+    }
+
+    if (!html.trim()) {
+      html = '<div class="slide-empty">(slide sem conteúdo identificável)</div>';
+    }
+
+    // Animação de troca
+    stage.classList.add('is-changing');
+    setTimeout(function () {
+      // Cor de fundo do slide (do PPTX) — fallback branco
+      stage.style.background = s.bgColor || '#FFFFFF';
+      stage.innerHTML = html;
+      requestAnimationFrame(function () {
+        stage.classList.remove('is-changing');
+        updateScale();
+      });
+    }, 50);
   }
 
   // ─── Navegação ──────────────────────────────────────────────────
@@ -574,7 +721,6 @@ body {
     const isLast = current === slides.length - 1;
     btnNext.disabled = isLast;
 
-    // Progresso baseado em slides VISITADOS (não só posição atual)
     const progress = visited.size / slides.length;
     fill.style.width = (progress * 100).toFixed(1) + '%';
 
@@ -587,14 +733,11 @@ body {
     }
   }
 
-  // ─── Comunicação SCORM ──────────────────────────────────────────
+  // ─── SCORM persistence ──────────────────────────────────────────
   function saveProgress() {
     scormSet('cmi.location', String(current));
-
     const progress = visited.size / slides.length;
     scormSet('cmi.progress_measure', progress.toFixed(4));
-
-    // Marca completed quando todos visitados (>= 95% — alinhado com manifest)
     if (progress >= 0.95) {
       scormSet('cmi.completion_status', 'completed');
       scormSet('cmi.success_status', 'passed');
@@ -602,14 +745,11 @@ body {
     } else {
       scormSet('cmi.completion_status', 'incomplete');
     }
-
-    // session_time formato ISO 8601 duration (PT0H0M0S)
     const secs = Math.floor((Date.now() - startTime) / 1000);
     const h = Math.floor(secs / 3600);
     const m = Math.floor((secs % 3600) / 60);
     const sc = secs % 60;
     scormSet('cmi.session_time', 'PT' + h + 'H' + m + 'M' + sc + 'S');
-
     scormCommit();
   }
 
@@ -617,9 +757,7 @@ body {
     const loc = scormGet('cmi.location');
     if (loc !== '' && loc != null) {
       const idx = parseInt(loc, 10);
-      if (!isNaN(idx) && idx >= 0 && idx < slides.length) {
-        return idx;
-      }
+      if (!isNaN(idx) && idx >= 0 && idx < slides.length) return idx;
     }
     return 0;
   }
@@ -628,9 +766,8 @@ body {
   btnPrev.addEventListener('click', function () { goto(current - 1); });
   btnNext.addEventListener('click', function () { goto(current + 1); });
 
-  // Teclado: setas e PageUp/PageDown
   document.addEventListener('keydown', function (e) {
-    if (['ArrowRight','PageDown',' '].includes(e.key)) {
+    if (['ArrowRight','PageDown'].includes(e.key)) {
       e.preventDefault();
       if (current < slides.length - 1) goto(current + 1);
     } else if (['ArrowLeft','PageUp'].includes(e.key)) {
@@ -639,7 +776,6 @@ body {
     }
   });
 
-  // Ao fechar/sair, salva e termina
   window.addEventListener('pagehide', function () {
     saveProgress();
     scormTerminate();
@@ -649,7 +785,6 @@ body {
     scormTerminate();
   });
 
-  // Auto-commit periódico (segurança)
   setInterval(saveProgress, 30000);
 
   // ─── Bootstrap ───────────────────────────────────────────────────
@@ -658,15 +793,16 @@ body {
     .then(function (data) {
       slides = data;
       if (!slides.length) {
-        stage.innerHTML = '<div class="slide"><p class="slide-empty">Apresentação vazia.</p></div>';
+        stage.innerHTML = '<div class="slide-empty">Apresentação vazia.</div>';
         return;
       }
+      updateScale();
       const startAt = restoreProgress();
       goto(startAt);
     })
     .catch(function (err) {
       console.error('Falha ao carregar slides.json:', err);
-      stage.innerHTML = '<div class="slide"><p class="slide-empty">Erro ao carregar conteúdo.</p></div>';
+      stage.innerHTML = '<div class="slide-empty">Erro ao carregar conteúdo.</div>';
     });
 })();`;
   }
@@ -683,17 +819,21 @@ body {
       throw new Error('Estrutura ParsedDeck inválida.');
     }
 
+    const slideSize = parsed.slideSize || { cx: 12192000, cy: 6858000 };
+    const stageW = emuToPx(slideSize.cx);
+    const stageH = emuToPx(slideSize.cy);
+    log('info', `Stage real: ${stageW}×${stageH}px (${slideSize.cx}×${slideSize.cy} EMU)`);
+
     const zip = new JSZip();
 
-    // 1. Copia mídia para media/, com nomes únicos seguros.
+    // 1. Mídia
     log('info', 'Copiando arquivos de mídia para o pacote…');
-    const mediaList = [];   // [{ originalPath, scormPath }]
-    const mediaMap = {};    // originalPath → scormPath
+    const mediaList = [];
+    const mediaMap = {};
     const usedNames = new Set();
 
     for (const [origPath, blob] of Object.entries(parsed.mediaFiles || {})) {
       let safe = safeFilename(origPath);
-      // Garante unicidade
       if (usedNames.has(safe)) {
         const dot = safe.lastIndexOf('.');
         const base = dot > 0 ? safe.slice(0, dot) : safe;
@@ -705,27 +845,28 @@ body {
       usedNames.add(safe);
       const scormPath = `media/${safe}`;
       zip.file(scormPath, blob);
-      mediaList.push({ originalPath: origPath, scormPath });
+      mediaList.push(scormPath);
       mediaMap[origPath] = scormPath;
     }
     log('ok', `${mediaList.length} arquivo(s) de mídia copiado(s).`);
 
     // 2. slides.json
-    log('info', 'Gerando slides.json…');
+    log('info', 'Gerando slides.json com elementos posicionados…');
     const slidesData = buildSlidesData(parsed, mediaMap);
     zip.file('slides.json', JSON.stringify(slidesData, null, 2));
 
-    // 3. Player (HTML / CSS / JS)
-    log('info', 'Gerando player SCORM…');
-    zip.file('index.html', buildPlayerHTML(parsed, opts));
+    // 3. Player
+    log('info', 'Gerando player SCORM (HTML/CSS/JS)…');
+    zip.file('index.html', buildPlayerHTML(parsed, opts, slideSize));
     zip.file('player.css', buildPlayerCSS());
     zip.file('player.js', buildPlayerJS());
 
     // 4. Manifest
     log('info', 'Gerando imsmanifest.xml…');
-    zip.file('imsmanifest.xml', buildManifest(parsed, opts, mediaList));
+    const allFiles = ['index.html', 'player.css', 'player.js', 'slides.json', ...mediaList];
+    zip.file('imsmanifest.xml', buildManifest(parsed, opts, allFiles));
 
-    // 5. Empacota
+    // 5. ZIP
     log('info', 'Compactando ZIP…');
     const blob = await zip.generateAsync(
       { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
@@ -740,8 +881,8 @@ body {
     return blob;
   }
 
-  // ─── API pública ───────────────────────────────────────────────────
   window.SCORMGenerator = {
     generate,
+    _utils: { emuToPx, safeFilename, EMU_PER_PX },
   };
 })();

@@ -148,6 +148,240 @@
     return { isTitle, paragraphs };
   }
 
+  // ─── Helpers de posicionamento ────────────────────────────────────
+  // EMU = English Metric Units. 914400 EMU = 1 polegada. 9525 EMU = 1px @ 96dpi.
+  const EMU_PER_PX = 9525;
+
+  function readXfrm(node) {
+    const xfrm = $1(node, 'xfrm');
+    if (!xfrm) return null;
+    const off = $1(xfrm, 'off');
+    const ext = $1(xfrm, 'ext');
+    if (!off || !ext) return null;
+    return {
+      x: +off.getAttribute('x') || 0,
+      y: +off.getAttribute('y') || 0,
+      cx: +ext.getAttribute('cx') || 0,
+      cy: +ext.getAttribute('cy') || 0,
+      rot: +($1(xfrm, 'rot') ? xfrm.getAttribute('rot') || 0 : 0) / 60000, // graus
+    };
+  }
+
+  // Helper: pega rId em qualquer formato (r:id, r:embed, r:link)
+  function getRid(node, attr) {
+    return node.getAttribute('r:' + attr) ||
+      node.getAttributeNS(
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+        attr
+      );
+  }
+
+  // Lê parágrafo com formatação básica (font-size, bold, color, alignment)
+  function readParagraphRich(pNode) {
+    const pPr = $1(pNode, 'pPr');
+    const align = pPr ? (pPr.getAttribute('algn') || 'l') : 'l';
+    const indent = pPr ? +pPr.getAttribute('lvl') || 0 : 0;
+
+    // Marker (bullet) do parágrafo
+    const buChar = pPr ? $1(pPr, 'buChar') : null;
+    const isBullet = !!(buChar || (pPr && $1(pPr, 'buAutoNum')));
+
+    // Properties default a partir de <a:lstStyle> seriam ideais, mas pra MVP
+    // pegamos da rPr do primeiro run com sz definido
+    let fontSize = null, bold = false, italic = false, color = null;
+
+    const runs = [];
+    Array.from(pNode.childNodes).forEach((child) => {
+      if (child.nodeType !== 1) return;
+      if (child.localName === 'r') {
+        const t = $1(child, 't');
+        if (!t) return;
+        const text = t.textContent || '';
+        const rPr = $1(child, 'rPr');
+        if (rPr && fontSize == null) {
+          const sz = rPr.getAttribute('sz');
+          if (sz) fontSize = +sz / 100; // centipoints → points
+          if (rPr.getAttribute('b') === '1') bold = true;
+          if (rPr.getAttribute('i') === '1') italic = true;
+          const colorEl = $1(rPr, 'srgbClr');
+          if (colorEl && colorEl.getAttribute('val')) {
+            color = '#' + colorEl.getAttribute('val').toUpperCase();
+          }
+        }
+        runs.push({ text, bold: rPr && rPr.getAttribute('b') === '1' });
+      } else if (child.localName === 'br') {
+        runs.push({ text: '\n', isBreak: true });
+      } else if (child.localName === 'fld') {
+        const t = $1(child, 't');
+        if (t) runs.push({ text: t.textContent || '' });
+      }
+    });
+
+    const text = runs.map((r) => r.text).join('').replace(/\u00A0/g, ' ').trim();
+    if (!text) return null;
+
+    return { text, runs, fontSize, bold, italic, color, align, isBullet, indent };
+  }
+
+  // ─── Extração ordenada de ELEMENTOS posicionados ─────────────────
+  // Percorre o spTree em ordem e retorna [{ type, x, y, cx, cy, ... }]
+  // Tipos: 'text' | 'image' | 'youtube' | 'shape'
+  function extractElements(slideDoc, rels, slidePath) {
+    const elements = [];
+    const spTree = $1(slideDoc, 'spTree');
+    if (!spTree) return elements;
+
+    function visit(parent) {
+      Array.from(parent.childNodes).forEach((node) => {
+        if (node.nodeType !== 1) return;
+        const local = node.localName;
+
+        if (local === 'sp') {
+          processShape(node, elements);
+        } else if (local === 'pic') {
+          processPicture(node, rels, slidePath, elements);
+        } else if (local === 'grpSp') {
+          // Group shape: posições são relativas ao grupo, mas pra MVP
+          // pegamos as crianças com seus x/y absolutos do XML diretamente
+          // (PowerPoint normalmente já põe coordenadas absolutas dentro do grupo)
+          visit(node);
+        }
+      });
+    }
+
+    visit(spTree);
+    return elements;
+  }
+
+  function processShape(spNode, elements) {
+    const xfrm = readXfrm(spNode);
+    if (!xfrm) return;
+
+    const txBody = $1(spNode, 'txBody');
+    const ph = $1(spNode, 'ph');
+    const phType = ph ? (ph.getAttribute('type') || '') : '';
+    const isTitle = ['title', 'ctrTitle'].includes(phType);
+
+    if (!txBody) {
+      // Shape decorativo (retângulo, linha, etc) — captura cor de preenchimento se sólida
+      const solidFill = $1(spNode, 'solidFill');
+      const srgbClr = solidFill ? $1(solidFill, 'srgbClr') : null;
+      const fill = srgbClr ? '#' + (srgbClr.getAttribute('val') || '').toUpperCase() : null;
+      if (fill) {
+        elements.push({
+          type: 'shape',
+          ...xfrm,
+          fill,
+        });
+      }
+      return;
+    }
+
+    const paragraphs = $$(txBody, 'p')
+      .map(readParagraphRich)
+      .filter((p) => p);
+
+    if (paragraphs.length === 0) return;
+
+    // Anchor vertical do bodyPr ('t' top, 'ctr' center, 'b' bottom)
+    const bodyPr = $1(txBody, 'bodyPr');
+    const anchor = bodyPr ? (bodyPr.getAttribute('anchor') || 't') : 't';
+
+    elements.push({
+      type: 'text',
+      ...xfrm,
+      isTitle,
+      anchor,
+      paragraphs,
+    });
+  }
+
+  function processPicture(picNode, rels, slidePath, elements) {
+    const xfrm = readXfrm(picNode);
+    if (!xfrm) return;
+
+    // ⭐ Estratégia A: Online Video (PowerPoint Insert > Online Video)
+    // Estrutura: p:pic > p:nvPicPr > p:nvPr > p:videoFile r:link="..."
+    const videoFile = $1(picNode, 'videoFile');
+    if (videoFile) {
+      const rId = getRid(videoFile, 'link') || getRid(videoFile, 'id');
+      if (rId) {
+        const rel = rels.get(rId);
+        if (rel && rel.target) {
+          const videoId = extractYouTubeId(rel.target);
+          if (videoId) {
+            const blip = $1(picNode, 'blip');
+            let thumbnailPath = null;
+            if (blip) {
+              const blipRId = getRid(blip, 'embed');
+              if (blipRId) {
+                const blipRel = rels.get(blipRId);
+                if (blipRel) thumbnailPath = resolvePath(slidePath, blipRel.target);
+              }
+            }
+            elements.push({
+              type: 'youtube',
+              ...xfrm,
+              videoId,
+              url: rel.target,
+              thumbnailPath,
+              source: 'videoFile',
+            });
+            return;
+          }
+        }
+      }
+    }
+
+    // ⭐ Estratégia B: Imagem com HYPERLINK apontando pra YouTube
+    // (Comum quando o usuário insere thumbnail manualmente e linka)
+    const hlinks = $$(picNode, 'hlinkClick');
+    for (const link of hlinks) {
+      const rId = getRid(link, 'id');
+      if (!rId) continue;
+      const rel = rels.get(rId);
+      if (!rel || rel.targetMode !== 'External') continue;
+      const videoId = extractYouTubeId(rel.target);
+      if (!videoId) continue;
+
+      // É uma imagem-thumbnail apontando pra YouTube → trata como YT posicionado
+      const blip = $1(picNode, 'blip');
+      let thumbnailPath = null;
+      if (blip) {
+        const blipRId = getRid(blip, 'embed');
+        if (blipRId) {
+          const blipRel = rels.get(blipRId);
+          if (blipRel) thumbnailPath = resolvePath(slidePath, blipRel.target);
+        }
+      }
+      elements.push({
+        type: 'youtube',
+        ...xfrm,
+        videoId,
+        url: rel.target,
+        thumbnailPath,
+        source: 'hyperlink-image',
+      });
+      return;
+    }
+
+    // Imagem normal
+    const blip = $1(picNode, 'blip');
+    if (!blip) return;
+    const rId = getRid(blip, 'embed');
+    if (!rId) return;
+    const rel = rels.get(rId);
+    if (!rel) return;
+    const path = resolvePath(slidePath, rel.target);
+    if (!path) return;
+
+    elements.push({
+      type: 'image',
+      ...xfrm,
+      path,
+    });
+  }
+
   // ─── Extração de imagens (<p:pic>) ────────────────────────────────
   // Retorna [{ id, target, x, y, cx, cy }]
   function readImages(slideDoc, rels, slidePath) {
@@ -294,38 +528,124 @@
 
     const rels = await readRels(zip, slidePath);
 
-    // Textos: percorre todos os shapes e separa título de corpo
+    // Background do slide (cor sólida via <p:bg><p:bgPr><a:solidFill>)
+    let bgColor = null;
+    const bg = $1(doc, 'bg');
+    if (bg) {
+      const solidFill = $1(bg, 'solidFill');
+      if (solidFill) {
+        const srgb = $1(solidFill, 'srgbClr');
+        if (srgb && srgb.getAttribute('val')) {
+          bgColor = '#' + srgb.getAttribute('val').toUpperCase();
+        }
+      }
+    }
+
+    // ⭐ NOVO: extração ordenada de elementos posicionados
+    const elements = extractElements(doc, rels, slidePath);
+
+    // Identificação de título: primeiro elemento de texto com isTitle=true
     let title = null;
-    const paragraphs = [];
-    $$(doc, 'sp').forEach((sp) => {
-      const result = readShape(sp);
-      if (!result) return;
-      if (result.isTitle && !title) {
-        title = result.paragraphs.join(' · ');
-      } else {
-        paragraphs.push(...result.paragraphs);
+    elements.forEach((el) => {
+      if (el.type === 'text' && el.isTitle && !title) {
+        title = el.paragraphs.map((p) => p.text).join(' · ');
       }
     });
 
-    // Heurística: se não foi achado um título via placeholder mas o primeiro
-    // parágrafo é curto (≤ 80 chars), considera-o o título do slide.
-    // PPTs criados sem layouts (ex: pptxgenjs sintético) não marcam type="title".
-    if (!title && paragraphs.length > 0 && paragraphs[0].length <= 80) {
-      title = paragraphs.shift();
+    // Campos LEGACY (derivados de elements, mantidos pra UI da preview)
+    const paragraphs = [];
+    elements.forEach((el) => {
+      if (el.type === 'text' && !el.isTitle) {
+        el.paragraphs.forEach((p) => paragraphs.push(p.text));
+      }
+    });
+
+    // Heurística: se não foi achado título via placeholder, e existe um
+    // elemento de texto com fontSize claramente maior que os outros, esse
+    // é o provável título. Senão, primeiro parágrafo curto.
+    if (!title) {
+      const textEls = elements.filter((e) => e.type === 'text');
+      if (textEls.length > 0) {
+        // Maior fonte
+        let maxFont = 0;
+        textEls.forEach((el) => {
+          el.paragraphs.forEach((p) => {
+            if (p.fontSize && p.fontSize > maxFont) maxFont = p.fontSize;
+          });
+        });
+        if (maxFont >= 28) {
+          // Tem texto grande — pega o primeiro parágrafo com essa fonte
+          for (const el of textEls) {
+            for (const p of el.paragraphs) {
+              if (p.fontSize === maxFont && !title) {
+                title = p.text;
+                // remove do legacy paragraphs
+                const idx = paragraphs.indexOf(p.text);
+                if (idx >= 0) paragraphs.splice(idx, 1);
+                break;
+              }
+            }
+            if (title) break;
+          }
+        }
+        if (!title && paragraphs.length > 0 && paragraphs[0].length <= 80) {
+          title = paragraphs.shift();
+        }
+      }
     }
 
-    const images = readImages(doc, rels, slidePath);
-    const youtubeVideos = readYouTube(doc, rels);
+    const images = elements
+      .filter((el) => el.type === 'image')
+      .map((el) => ({ id: null, path: el.path, x: el.x, y: el.y, cx: el.cx, cy: el.cy }));
+
+    const youtubeVideos = elements
+      .filter((el) => el.type === 'youtube')
+      .map((el) => ({ videoId: el.videoId, url: el.url, source: 'videoFile' }));
+
+    // YouTube via hyperlinks (pode não estar nos elements posicionados — ainda capturamos)
+    const ytFromLinks = readYouTubeFromLinks(doc, rels);
+    ytFromLinks.forEach((yt) => {
+      if (!youtubeVideos.find((v) => v.videoId === yt.videoId)) {
+        youtubeVideos.push(yt);
+      }
+    });
+
     const notes = await readNotes(zip, slidePath, rels);
 
     return {
       index,
       title,
-      paragraphs,
-      images,
-      youtubeVideos,
+      bgColor,          // ← cor de fundo (pode ser null = usa default branco)
+      elements,         // ← NOVO: array de elementos posicionados
+      paragraphs,       // legacy — usado pela UI da preview
+      images,           // legacy
+      youtubeVideos,    // legacy
       notes,
     };
+  }
+
+  // ─── YouTube via hyperlinks (não-posicionado) ─────────────────────
+  // Pega vídeos do YouTube referenciados como hyperlink em texto/shape.
+  // Para esses, NÃO sabemos a posição — eles serão exibidos como bloco extra.
+  function readYouTubeFromLinks(slideDoc, rels) {
+    const found = new Map();
+    const add = (url, source) => {
+      const id = extractYouTubeId(url);
+      if (id && !found.has(id)) found.set(id, { videoId: id, url, source });
+    };
+
+    ['hlinkClick', 'hlinkHover'].forEach((tag) => {
+      $$(slideDoc, tag).forEach((link) => {
+        const rId = getRid(link, 'id');
+        if (!rId) return;
+        const rel = rels.get(rId);
+        if (rel && rel.targetMode === 'External') {
+          add(rel.target, 'hyperlink');
+        }
+      });
+    });
+
+    return Array.from(found.values());
   }
 
   // ─── Lê título da apresentação (docProps/core.xml) ────────────────
@@ -473,7 +793,7 @@
       };
     },
 
-    // Exporta utilitários para teste
-    _utils: { extractYouTubeId, resolvePath },
+    // Exporta utilitários para teste e uso pelo gerador
+    _utils: { extractYouTubeId, resolvePath, EMU_PER_PX: 9525 },
   };
 })();
