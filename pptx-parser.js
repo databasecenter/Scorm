@@ -84,6 +84,153 @@
     return null;
   }
 
+  // ═══ THEME & COLOR RESOLUTION ═════════════════════════════════════
+  // Lê ppt/theme/theme1.xml e retorna mapa { accent1: '#4472C4', dk1: '#000000', ... }
+  async function readTheme(zip) {
+    const themeMap = {
+      bg1: '#FFFFFF', tx1: '#000000', bg2: '#E7E6E6', tx2: '#44546A',
+      lt1: '#FFFFFF', dk1: '#000000', lt2: '#E7E6E6', dk2: '#44546A',
+      accent1: '#4472C4', accent2: '#ED7D31', accent3: '#A5A5A5',
+      accent4: '#FFC000', accent5: '#5B9BD5', accent6: '#70AD47',
+      hlink: '#0563C1', folHlink: '#954F72',
+    };
+    let themeFile = null;
+    for (let i = 1; i <= 5; i++) {
+      themeFile = zip.file(`ppt/theme/theme${i}.xml`);
+      if (themeFile) break;
+    }
+    if (!themeFile) return themeMap;
+    try {
+      const doc = parseXML(await themeFile.async('string'));
+      const clrScheme = $1(doc, 'clrScheme');
+      if (!clrScheme) return themeMap;
+      Array.from(clrScheme.childNodes).forEach((node) => {
+        if (node.nodeType !== 1) return;
+        const name = node.localName;
+        const srgb = $1(node, 'srgbClr');
+        const sys = $1(node, 'sysClr');
+        let hex = null;
+        if (srgb && srgb.getAttribute('val')) hex = '#' + srgb.getAttribute('val').toUpperCase();
+        else if (sys && sys.getAttribute('lastClr')) hex = '#' + sys.getAttribute('lastClr').toUpperCase();
+        if (hex) themeMap[name] = hex;
+      });
+      // Aliases convencionais
+      if (themeMap.dk1 && !themeMap.tx1Set) themeMap.tx1 = themeMap.dk1;
+      if (themeMap.lt1) themeMap.bg1 = themeMap.lt1;
+      if (themeMap.dk2) themeMap.tx2 = themeMap.dk2;
+      if (themeMap.lt2) themeMap.bg2 = themeMap.lt2;
+    } catch (e) {}
+    return themeMap;
+  }
+
+  // Conversão HSL pra aplicar lumMod/lumOff/tint/shade
+  function hexToHsl(hex) {
+    const m = /^#?([0-9A-Fa-f]{6})$/.exec(hex);
+    if (!m) return null;
+    const r = parseInt(m[1].slice(0, 2), 16) / 255;
+    const g = parseInt(m[1].slice(2, 4), 16) / 255;
+    const b = parseInt(m[1].slice(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h, s, l = (max + min) / 2;
+    if (max === min) { h = s = 0; }
+    else {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+      else if (max === g) h = ((b - r) / d + 2);
+      else h = ((r - g) / d + 4);
+      h /= 6;
+    }
+    return { h, s, l };
+  }
+  function hslToHex({ h, s, l }) {
+    let r, g, b;
+    if (s === 0) { r = g = b = l; }
+    else {
+      const hue2rgb = (p, q, t) => {
+        if (t < 0) t += 1; if (t > 1) t -= 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+      };
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      const p = 2 * l - q;
+      r = hue2rgb(p, q, h + 1 / 3);
+      g = hue2rgb(p, q, h);
+      b = hue2rgb(p, q, h - 1 / 3);
+    }
+    const toHex = (x) => {
+      const v = Math.round(Math.max(0, Math.min(255, x * 255)));
+      return v.toString(16).padStart(2, '0');
+    };
+    return ('#' + toHex(r) + toHex(g) + toHex(b)).toUpperCase();
+  }
+  function applyColorMods(hex, mods) {
+    if (!mods || Object.keys(mods).length === 0) return hex;
+    const hsl = hexToHsl(hex);
+    if (!hsl) return hex;
+    if (mods.lumMod !== undefined) hsl.l = hsl.l * (mods.lumMod / 100000);
+    if (mods.lumOff !== undefined) hsl.l = hsl.l + (mods.lumOff / 100000);
+    if (mods.satMod !== undefined) hsl.s = hsl.s * (mods.satMod / 100000);
+    if (mods.satOff !== undefined) hsl.s = hsl.s + (mods.satOff / 100000);
+    if (mods.tint !== undefined) {
+      const t = mods.tint / 100000;
+      hsl.l = hsl.l + (1 - hsl.l) * (1 - t);
+    }
+    if (mods.shade !== undefined) {
+      const sh = mods.shade / 100000;
+      hsl.l = hsl.l * sh;
+    }
+    hsl.l = Math.max(0, Math.min(1, hsl.l));
+    hsl.s = Math.max(0, Math.min(1, hsl.s));
+    return hslToHex(hsl);
+  }
+
+  // Resolve um pai (rPr, solidFill, etc) em cor hex.
+  // Suporta srgbClr, schemeClr, sysClr, prstClr, com modificadores filhos.
+  function resolveColor(colorParent, themeMap) {
+    if (!colorParent) return null;
+    let colorNode = null;
+    Array.from(colorParent.childNodes).forEach((n) => {
+      if (n.nodeType !== 1) return;
+      if (['srgbClr', 'schemeClr', 'sysClr', 'prstClr'].includes(n.localName)) {
+        colorNode = n;
+      }
+    });
+    if (!colorNode) return null;
+    const mods = {};
+    Array.from(colorNode.childNodes).forEach((n) => {
+      if (n.nodeType !== 1) return;
+      const v = n.getAttribute('val');
+      if (v && ['lumMod','lumOff','satMod','satOff','tint','shade','alpha'].includes(n.localName)) {
+        mods[n.localName] = +v;
+      }
+    });
+    let baseHex = null;
+    const tag = colorNode.localName;
+    const val = colorNode.getAttribute('val');
+    if (tag === 'srgbClr' && val) baseHex = '#' + val.toUpperCase();
+    else if (tag === 'schemeClr' && val) {
+      let key = val;
+      if (key === 'bg1' && !themeMap.bg1) key = 'lt1';
+      if (key === 'tx1' && !themeMap.tx1) key = 'dk1';
+      if (key === 'bg2' && !themeMap.bg2) key = 'lt2';
+      if (key === 'tx2' && !themeMap.tx2) key = 'dk2';
+      baseHex = themeMap[key] || null;
+    } else if (tag === 'sysClr') {
+      const last = colorNode.getAttribute('lastClr');
+      if (last) baseHex = '#' + last.toUpperCase();
+    } else if (tag === 'prstClr' && val) {
+      const presetMap = { black:'#000000', white:'#FFFFFF', red:'#FF0000',
+        green:'#008000', blue:'#0000FF', yellow:'#FFFF00', gray:'#808080' };
+      baseHex = presetMap[val] || null;
+    }
+    if (!baseHex) return null;
+    return applyColorMods(baseHex, mods);
+  }
+  // ═══ END THEME & COLOR ═════════════════════════════════════════════
+
   // ─── Parser de _rels ───────────────────────────────────────────────
   // Retorna Map { rId → { type, target, targetMode } }
   async function readRels(zip, slidePath) {
@@ -177,17 +324,14 @@
   }
 
   // Lê parágrafo com formatação básica (font-size, bold, color, alignment)
-  function readParagraphRich(pNode) {
+  function readParagraphRich(pNode, themeMap) {
     const pPr = $1(pNode, 'pPr');
     const align = pPr ? (pPr.getAttribute('algn') || 'l') : 'l';
     const indent = pPr ? +pPr.getAttribute('lvl') || 0 : 0;
 
-    // Marker (bullet) do parágrafo
     const buChar = pPr ? $1(pPr, 'buChar') : null;
     const isBullet = !!(buChar || (pPr && $1(pPr, 'buAutoNum')));
 
-    // Properties default a partir de <a:lstStyle> seriam ideais, mas pra MVP
-    // pegamos da rPr do primeiro run com sz definido
     let fontSize = null, bold = false, italic = false, color = null;
 
     const runs = [];
@@ -200,12 +344,18 @@
         const rPr = $1(child, 'rPr');
         if (rPr && fontSize == null) {
           const sz = rPr.getAttribute('sz');
-          if (sz) fontSize = +sz / 100; // centipoints → points
+          if (sz) fontSize = +sz / 100;
           if (rPr.getAttribute('b') === '1') bold = true;
           if (rPr.getAttribute('i') === '1') italic = true;
-          const colorEl = $1(rPr, 'srgbClr');
-          if (colorEl && colorEl.getAttribute('val')) {
-            color = '#' + colorEl.getAttribute('val').toUpperCase();
+          // ⭐ Cor agora resolve schemeClr/solidFill/etc do tema
+          // Estrutura comum: <a:rPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:rPr>
+          const solidFill = $1(rPr, 'solidFill');
+          if (solidFill) {
+            color = resolveColor(solidFill, themeMap || {});
+          }
+          // Variante: cor direta no <a:rPr><a:srgbClr/> (raro mas possível)
+          if (!color) {
+            color = resolveColor(rPr, themeMap || {});
           }
         }
         runs.push({ text, bold: rPr && rPr.getAttribute('b') === '1' });
@@ -226,7 +376,7 @@
   // ─── Extração ordenada de ELEMENTOS posicionados ─────────────────
   // Percorre o spTree em ordem e retorna [{ type, x, y, cx, cy, ... }]
   // Tipos: 'text' | 'image' | 'youtube' | 'shape'
-  function extractElements(slideDoc, rels, slidePath) {
+  function extractElements(slideDoc, rels, slidePath, themeMap) {
     const elements = [];
     const spTree = $1(slideDoc, 'spTree');
     if (!spTree) return elements;
@@ -237,13 +387,10 @@
         const local = node.localName;
 
         if (local === 'sp') {
-          processShape(node, elements);
+          processShape(node, elements, themeMap);
         } else if (local === 'pic') {
           processPicture(node, rels, slidePath, elements);
         } else if (local === 'grpSp') {
-          // Group shape: posições são relativas ao grupo, mas pra MVP
-          // pegamos as crianças com seus x/y absolutos do XML diretamente
-          // (PowerPoint normalmente já põe coordenadas absolutas dentro do grupo)
           visit(node);
         }
       });
@@ -253,7 +400,7 @@
     return elements;
   }
 
-  function processShape(spNode, elements) {
+  function processShape(spNode, elements, themeMap) {
     const xfrm = readXfrm(spNode);
     if (!xfrm) return;
 
@@ -263,27 +410,22 @@
     const isTitle = ['title', 'ctrTitle'].includes(phType);
 
     if (!txBody) {
-      // Shape decorativo (retângulo, linha, etc) — captura cor de preenchimento se sólida
-      const solidFill = $1(spNode, 'solidFill');
-      const srgbClr = solidFill ? $1(solidFill, 'srgbClr') : null;
-      const fill = srgbClr ? '#' + (srgbClr.getAttribute('val') || '').toUpperCase() : null;
+      // Shape decorativo — captura cor de preenchimento
+      const spPr = $1(spNode, 'spPr');
+      const solidFill = spPr ? $1(spPr, 'solidFill') : null;
+      const fill = solidFill ? resolveColor(solidFill, themeMap) : null;
       if (fill) {
-        elements.push({
-          type: 'shape',
-          ...xfrm,
-          fill,
-        });
+        elements.push({ type: 'shape', ...xfrm, fill });
       }
       return;
     }
 
     const paragraphs = $$(txBody, 'p')
-      .map(readParagraphRich)
+      .map((p) => readParagraphRich(p, themeMap))
       .filter((p) => p);
 
     if (paragraphs.length === 0) return;
 
-    // Anchor vertical do bodyPr ('t' top, 'ctr' center, 'b' bottom)
     const bodyPr = $1(txBody, 'bodyPr');
     const anchor = bodyPr ? (bodyPr.getAttribute('anchor') || 't') : 't';
 
@@ -519,7 +661,7 @@
   }
 
   // ─── Parse de um slide individual ─────────────────────────────────
-  async function parseSlide(zip, slidePath, index, log) {
+  async function parseSlide(zip, slidePath, index, themeMap, log) {
     const file = zip.file(slidePath);
     if (!file) throw new Error(`Slide não encontrado: ${slidePath}`);
 
@@ -534,15 +676,12 @@
     if (bg) {
       const solidFill = $1(bg, 'solidFill');
       if (solidFill) {
-        const srgb = $1(solidFill, 'srgbClr');
-        if (srgb && srgb.getAttribute('val')) {
-          bgColor = '#' + srgb.getAttribute('val').toUpperCase();
-        }
+        bgColor = resolveColor(solidFill, themeMap);
       }
     }
 
     // ⭐ NOVO: extração ordenada de elementos posicionados
-    const elements = extractElements(doc, rels, slidePath);
+    const elements = extractElements(doc, rels, slidePath, themeMap);
 
     // Identificação de título: primeiro elemento de texto com isTitle=true
     let title = null;
@@ -723,12 +862,16 @@
       log('ok', `Ordem de ${slidePaths.length} slide(s) determinada.`);
       log('info', `Tamanho do slide: ${(slideSize.cx/914400).toFixed(2)}" × ${(slideSize.cy/914400).toFixed(2)}"`);
 
+      // ⭐ NOVO: Lê tema (cores) — carrega 1x e propaga pra todos os slides
+      const themeMap = await readTheme(zip);
+      log('info', `Tema carregado: accent1=${themeMap.accent1}, accent2=${themeMap.accent2}`);
+
       // 3. Parse de cada slide
       const slides = [];
       const mediaPaths = new Set();
       for (let i = 0; i < slidePaths.length; i++) {
         try {
-          const parsed = await parseSlide(zip, slidePaths[i], i + 1, log);
+          const parsed = await parseSlide(zip, slidePaths[i], i + 1, themeMap, log);
           slides.push(parsed);
           parsed.images.forEach((img) => mediaPaths.add(img.path));
           // Log resumido
