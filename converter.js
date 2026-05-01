@@ -2,7 +2,7 @@
    CONVERTER.JS · Orquestrador principal · PPTX → SCORM
    ─────────────────────────────────────────────────────────────────────
    Responsável por:
-   - Capturar o arquivo (drag&drop ou input)
+   - Capturar o arquivo (drag&drop, clique no botão ou na dropzone)
    - Validar que é um PPTX legítimo (ZIP + ppt/presentation.xml)
    - Coletar estatísticas iniciais (slides, mídias)
    - Atualizar a UI e o log
@@ -12,7 +12,7 @@
 (function () {
   'use strict';
 
-  // ─── Estado em memória (uma conversão por vez) ─────────────────────
+  // ─── Estado em memória ─────────────────────────────────────────────
   const state = {
     file: null,        // File original
     zip: null,         // JSZip instance do PPTX
@@ -22,19 +22,20 @@
 
   // ─── DOM refs ──────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
-  const dropzone   = $('dropzone');
-  const fileInput  = $('fileInput');
-  const panel      = $('panel');
-  const panelStatus= $('panelStatus');
-  const fileName   = $('fileName');
-  const fileSize   = $('fileSize');
-  const statSlides = $('statSlides');
-  const statImages = $('statImages');
-  const statMedia  = $('statMedia');
-  const statSize   = $('statSize');
-  const logBlock   = $('logBlock');
-  const btnConvert = $('btnConvert');
-  const btnReset   = $('btnReset');
+  const dropzone     = $('dropzone');
+  const fileInput    = $('fileInput');
+  const btnPickFile  = $('btnPickFile');
+  const panel        = $('panel');
+  const panelStatus  = $('panelStatus');
+  const fileName     = $('fileName');
+  const fileSize     = $('fileSize');
+  const statSlides   = $('statSlides');
+  const statImages   = $('statImages');
+  const statMedia    = $('statMedia');
+  const statSize     = $('statSize');
+  const logBlock     = $('logBlock');
+  const btnConvert   = $('btnConvert');
+  const btnReset     = $('btnReset');
 
   // ─── Logger visual ─────────────────────────────────────────────────
   function log(level, msg) {
@@ -47,7 +48,6 @@
       `<span class="log-msg">${escapeHtml(msg)}</span>`;
     logBlock.appendChild(line);
     logBlock.scrollTop = logBlock.scrollHeight;
-    // Mirror no console pra facilitar debug
     const fn = level === 'err' ? 'error' : level === 'warn' ? 'warn' : 'log';
     console[fn](`[converter] ${msg}`);
   }
@@ -58,7 +58,7 @@
   }
 
   // ─── Helpers de UI ─────────────────────────────────────────────────
-  function setStatus(text, mode /* 'is-busy' | 'is-error' | '' */) {
+  function setStatus(text, mode) {
     panelStatus.textContent = text;
     panelStatus.classList.remove('is-busy', 'is-error');
     if (mode) panelStatus.classList.add(mode);
@@ -85,6 +85,13 @@
     hidePanel();
   }
 
+  // ─── Abrir o seletor de arquivo via JS ─────────────────────────────
+  // Como o input file é oculto e a dropzone é uma <div> (não <label>),
+  // precisamos disparar o click programaticamente.
+  function openFilePicker() {
+    fileInput.click();
+  }
+
   // ─── Drag & drop ───────────────────────────────────────────────────
   ['dragenter', 'dragover'].forEach(evt => {
     dropzone.addEventListener(evt, (e) => {
@@ -105,24 +112,50 @@
     if (f) handleFile(f);
   });
 
-  // Input clássico
+  // ─── Clique na dropzone abre o seletor ─────────────────────────────
+  dropzone.addEventListener('click', (e) => {
+    // Se clicou no botão ou em algo dentro dele, deixa o handler do botão agir.
+    if (e.target.closest('#btnPickFile')) return;
+    openFilePicker();
+  });
+
+  // Suporte a teclado (Enter / Space) na dropzone
+  dropzone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openFilePicker();
+    }
+  });
+
+  // ─── Botão "Selecionar arquivo" dentro da dropzone ─────────────────
+  btnPickFile.addEventListener('click', (e) => {
+    e.stopPropagation();   // evita disparar o click da dropzone também
+    openFilePicker();
+  });
+
+  // ─── Input file (resultado da seleção) ─────────────────────────────
   fileInput.addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
     if (f) handleFile(f);
   });
 
-  // Evita que o navegador abra o arquivo se o usuário soltar fora do dropzone
+  // Bloqueia drop fora da dropzone (senão o navegador abre o arquivo)
   ['dragover', 'drop'].forEach(evt => {
-    window.addEventListener(evt, (e) => e.preventDefault(), false);
+    window.addEventListener(evt, (e) => {
+      // Só previne se NÃO estiver dentro da dropzone
+      if (!e.target.closest || !e.target.closest('#dropzone')) {
+        e.preventDefault();
+      }
+    }, false);
   });
 
-  // Reset
+  // ─── Reset ─────────────────────────────────────────────────────────
   btnReset.addEventListener('click', () => {
     resetState();
     log('info', 'Estado resetado. Pronto para novo arquivo.');
   });
 
-  // Botão de conversão (passo 3 — placeholder por enquanto)
+  // ─── Botão de conversão (passo 3 — placeholder) ────────────────────
   btnConvert.addEventListener('click', () => {
     if (!state.zip) return;
     log('warn', 'Geração SCORM ainda não implementada (passo 3 do MVP).');
@@ -134,7 +167,6 @@
     resetState();
     state.file = file;
 
-    // 1. Validações superficiais
     fileName.textContent = file.name;
     fileSize.textContent = fmtBytes(file.size);
     statSize.textContent = fmtBytes(file.size);
@@ -143,6 +175,7 @@
 
     log('info', `Arquivo recebido: ${file.name} (${fmtBytes(file.size)})`);
 
+    // 1. Validações superficiais
     if (!file.name.toLowerCase().endsWith('.pptx')) {
       setStatus('ARQUIVO INVÁLIDO', 'is-error');
       log('err', 'Extensão não é .pptx. Operação abortada.');
@@ -174,7 +207,7 @@
       return;
     }
 
-    // 3. Verifica que é mesmo um PPTX (precisa ter ppt/presentation.xml)
+    // 3. Verifica que é mesmo um PPTX
     if (!state.zip.file('ppt/presentation.xml')) {
       setStatus('NÃO É UM PPTX', 'is-error');
       log('err', 'Estrutura interna não corresponde a um arquivo PPTX (faltou ppt/presentation.xml).');
@@ -183,7 +216,7 @@
     }
     log('ok', 'Estrutura PPTX validada (ppt/presentation.xml presente).');
 
-    // 4. Coleta estatísticas rápidas (sem parsing OOXML pesado)
+    // 4. Estatísticas rápidas
     try {
       const stats = quickScan(state.zip);
       state.stats = stats;
@@ -209,20 +242,16 @@
     log('info', '→ Próximo passo (em desenvolvimento): extrair conteúdo dos slides.');
   }
 
-  // ─── Scan rápido do ZIP (não faz parsing OOXML profundo) ──────────
-  // Apenas conta entradas em pastas conhecidas — feedback instantâneo.
+  // ─── Scan rápido (sem parsing OOXML profundo) ──────────────────────
   function quickScan(zip) {
     let slideCount = 0;
     let imageCount = 0;
     let mediaCount = 0;
 
     Object.keys(zip.files).forEach((path) => {
-      // Slides reais ficam em ppt/slides/slide1.xml, slide2.xml, …
-      // (NÃO contamos slideLayout/slideMaster nem _rels/)
       if (/^ppt\/slides\/slide\d+\.xml$/i.test(path)) {
         slideCount++;
       }
-      // Mídia embutida: ppt/media/image1.png, video1.mp4, audio1.m4a, etc.
       if (/^ppt\/media\//i.test(path) && !path.endsWith('/')) {
         const ext = path.split('.').pop().toLowerCase();
         if (['png','jpg','jpeg','gif','bmp','tiff','svg','emf','wmf'].includes(ext)) {
@@ -236,7 +265,7 @@
     return { slideCount, imageCount, mediaCount };
   }
 
-  // ─── Exposição global pra debug no console ─────────────────────────
+  // ─── Debug ─────────────────────────────────────────────────────────
   window.__pptxConverter = { state, log };
   log('info', 'Conversor carregado. Aguardando arquivo .pptx…');
 })();
