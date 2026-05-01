@@ -254,11 +254,141 @@
     return rels;
   }
 
+  // ═══ LAYOUT & MASTER INHERITANCE ═══════════════════════════════════
+  // Em PPTs profissionais, posição/cor/fonte de título e bullets vêm do
+  // Slide Layout (que herda do Slide Master). O slide só preenche o texto.
+  // Sem ler layout+master, o título "vaza" pra fora ou fica sem cor.
+
+  // Lê o Slide Layout do slide via _rels, e o Master via _rels do layout.
+  async function readLayoutAndMaster(zip, slidePath) {
+    const slideRels = await readRels(zip, slidePath);
+    let layoutPath = null;
+    for (const info of slideRels.values()) {
+      if (info.type && /slideLayout$/.test(info.type)) {
+        layoutPath = resolvePath(slidePath, info.target);
+        break;
+      }
+    }
+    let layoutDoc = null, masterDoc = null, masterPath = null;
+
+    if (layoutPath && zip.file(layoutPath)) {
+      try {
+        layoutDoc = parseXML(await zip.file(layoutPath).async('string'));
+        const layoutRels = await readRels(zip, layoutPath);
+        for (const info of layoutRels.values()) {
+          if (info.type && /slideMaster$/.test(info.type)) {
+            masterPath = resolvePath(layoutPath, info.target);
+            break;
+          }
+        }
+        if (masterPath && zip.file(masterPath)) {
+          masterDoc = parseXML(await zip.file(masterPath).async('string'));
+        }
+      } catch (e) { /* layout/master inválido — ignora */ }
+    }
+    return { layoutDoc, masterDoc, layoutPath, masterPath };
+  }
+
+  // Constrói mapa { phKey → { xfrm, defColor, defFontSize, defBold, anchor } }
+  // Master fornece defaults; layout sobrescreve.
+  // phKey pode ser 'title', 'ctrTitle', 'body:0', 'body:1' etc.
+  function buildPlaceholderMap(layoutDoc, masterDoc, themeMap) {
+    const map = new Map();
+
+    function ingestDoc(doc) {
+      if (!doc) return;
+      const spTree = $1(doc, 'spTree');
+      if (!spTree) return;
+
+      Array.from(spTree.childNodes).forEach((node) => {
+        if (node.nodeType !== 1 || node.localName !== 'sp') return;
+        const ph = $1(node, 'ph');
+        if (!ph) return;
+        const type = ph.getAttribute('type') || 'body';
+        const idx = ph.getAttribute('idx') || '0';
+
+        const xfrm = readXfrm(node);
+        const txBody = $1(node, 'txBody');
+        const bodyPr = txBody ? $1(txBody, 'bodyPr') : null;
+        const anchor = bodyPr ? bodyPr.getAttribute('anchor') : null;
+
+        // Pega defaults do <a:lstStyle><a:lvl1pPr><a:defRPr> (formato OOXML)
+        let defColor = null, defFontSize = null, defBold = null;
+        if (txBody) {
+          const lstStyle = $1(txBody, 'lstStyle');
+          if (lstStyle) {
+            const lvl1pPr = $1(lstStyle, 'lvl1pPr');
+            if (lvl1pPr) {
+              const defRPr = $1(lvl1pPr, 'defRPr');
+              if (defRPr) {
+                const sz = defRPr.getAttribute('sz');
+                if (sz) defFontSize = +sz / 100;
+                if (defRPr.getAttribute('b') === '1') defBold = true;
+                const sf = $1(defRPr, 'solidFill');
+                if (sf) defColor = resolveColor(sf, themeMap);
+              }
+            }
+          }
+        }
+
+        // Também tenta pegar cor do PRIMEIRO run real (caso layout/master
+        // tenha um placeholder com texto exemplo já formatado)
+        if (!defColor && txBody) {
+          const firstP = $1(txBody, 'p');
+          if (firstP) {
+            const firstR = $1(firstP, 'r');
+            const rPr = firstR ? $1(firstR, 'rPr') : null;
+            if (rPr) {
+              const sf = $1(rPr, 'solidFill');
+              if (sf) defColor = resolveColor(sf, themeMap);
+              const sz = rPr.getAttribute('sz');
+              if (sz && !defFontSize) defFontSize = +sz / 100;
+              if (rPr.getAttribute('b') === '1' && defBold == null) defBold = true;
+            }
+          }
+        }
+
+        // Chave principal: type+idx. Aliases adicionais ajudam o match.
+        const key = type + ':' + idx;
+        const existing = map.get(key) || {};
+        map.set(key, {
+          xfrm: xfrm || existing.xfrm,
+          defColor: defColor || existing.defColor,
+          defFontSize: defFontSize || existing.defFontSize,
+          defBold: defBold != null ? defBold : existing.defBold,
+          anchor: anchor || existing.anchor,
+        });
+
+        // Aliases — ajuda quando idx não bate exatamente
+        // 'title' geralmente sem idx; 'body' costuma ter idx
+        if (type === 'title' || type === 'ctrTitle') {
+          const alias = 'title:any';
+          map.set(alias, map.get(key));
+        }
+      });
+    }
+
+    ingestDoc(masterDoc);   // defaults
+    ingestDoc(layoutDoc);   // override (layout > master)
+    return map;
+  }
+
+  // Lookup com fallbacks
+  function resolvePh(phMap, type, idx) {
+    if (!phMap) return null;
+    return phMap.get(type + ':' + idx)
+        || phMap.get(type + ':0')
+        || (type === 'ctrTitle' && phMap.get('title:0'))
+        || (type === 'title' && phMap.get('ctrTitle:0'))
+        || phMap.get((type || 'body') + ':any')
+        || null;
+  }
+  // ═══ END LAYOUT & MASTER ═══════════════════════════════════════════
+
   // ─── Extração de texto de um <a:p> ─────────────────────────────────
   // Concatena todos os <a:t> dentro do parágrafo (inclui line breaks <a:br>)
   function readParagraph(pNode) {
     const out = [];
-    // Itera filhos diretos do parágrafo na ordem em que aparecem
     Array.from(pNode.childNodes).forEach((child) => {
       if (child.nodeType !== 1) return;
       const local = child.localName;
@@ -268,7 +398,6 @@
       } else if (local === 'br') {
         out.push('\n');
       } else if (local === 'fld') {
-        // Field (data, número de slide etc.) — pega o texto se houver
         const t = $1(child, 't');
         if (t) out.push(t.textContent || '');
       }
@@ -324,7 +453,8 @@
   }
 
   // Lê parágrafo com formatação básica (font-size, bold, color, alignment)
-  function readParagraphRich(pNode, themeMap) {
+  // `inherited` vem do placeholder map (layout/master) para preencher faltas
+  function readParagraphRich(pNode, themeMap, inherited) {
     const pPr = $1(pNode, 'pPr');
     const align = pPr ? (pPr.getAttribute('algn') || 'l') : 'l';
     const indent = pPr ? +pPr.getAttribute('lvl') || 0 : 0;
@@ -347,13 +477,12 @@
           if (sz) fontSize = +sz / 100;
           if (rPr.getAttribute('b') === '1') bold = true;
           if (rPr.getAttribute('i') === '1') italic = true;
-          // ⭐ Cor agora resolve schemeClr/solidFill/etc do tema
-          // Estrutura comum: <a:rPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:rPr>
+          // Cor do <a:solidFill> (com schemeClr resolvido)
           const solidFill = $1(rPr, 'solidFill');
           if (solidFill) {
             color = resolveColor(solidFill, themeMap || {});
           }
-          // Variante: cor direta no <a:rPr><a:srgbClr/> (raro mas possível)
+          // Variante: cor direta no rPr (raro)
           if (!color) {
             color = resolveColor(rPr, themeMap || {});
           }
@@ -370,13 +499,18 @@
     const text = runs.map((r) => r.text).join('').replace(/\u00A0/g, ' ').trim();
     if (!text) return null;
 
+    // ⭐ HERANÇA: se faltar cor/fontSize/bold no run, herda do layout/master
+    if (inherited) {
+      if (!color && inherited.defColor) color = inherited.defColor;
+      if (fontSize == null && inherited.defFontSize) fontSize = inherited.defFontSize;
+      if (!bold && inherited.defBold) bold = true;
+    }
+
     return { text, runs, fontSize, bold, italic, color, align, isBullet, indent };
   }
 
   // ─── Extração ordenada de ELEMENTOS posicionados ─────────────────
-  // Percorre o spTree em ordem e retorna [{ type, x, y, cx, cy, ... }]
-  // Tipos: 'text' | 'image' | 'youtube' | 'shape'
-  function extractElements(slideDoc, rels, slidePath, themeMap) {
+  function extractElements(slideDoc, rels, slidePath, themeMap, phMap) {
     const elements = [];
     const spTree = $1(slideDoc, 'spTree');
     if (!spTree) return elements;
@@ -385,9 +519,8 @@
       Array.from(parent.childNodes).forEach((node) => {
         if (node.nodeType !== 1) return;
         const local = node.localName;
-
         if (local === 'sp') {
-          processShape(node, elements, themeMap);
+          processShape(node, elements, themeMap, phMap);
         } else if (local === 'pic') {
           processPicture(node, rels, slidePath, elements);
         } else if (local === 'grpSp') {
@@ -400,14 +533,28 @@
     return elements;
   }
 
-  function processShape(spNode, elements, themeMap) {
-    const xfrm = readXfrm(spNode);
+  function processShape(spNode, elements, themeMap, phMap) {
+    let xfrm = readXfrm(spNode);
+
+    // Detecta placeholder e seu tipo/idx
+    const ph = $1(spNode, 'ph');
+    const phType = ph ? (ph.getAttribute('type') || 'body') : null;
+    const phIdx = ph ? (ph.getAttribute('idx') || '0') : null;
+    const isTitle = ['title', 'ctrTitle'].includes(phType);
+
+    // ⭐ HERANÇA: se shape é placeholder, busca propriedades default no layout/master
+    let inherited = null;
+    if (ph && phMap) {
+      inherited = resolvePh(phMap, phType, phIdx);
+      // Se slide não tem xfrm próprio, herda do layout/master
+      if (!xfrm && inherited && inherited.xfrm) {
+        xfrm = inherited.xfrm;
+      }
+    }
+
     if (!xfrm) return;
 
     const txBody = $1(spNode, 'txBody');
-    const ph = $1(spNode, 'ph');
-    const phType = ph ? (ph.getAttribute('type') || '') : '';
-    const isTitle = ['title', 'ctrTitle'].includes(phType);
 
     if (!txBody) {
       // Shape decorativo — captura cor de preenchimento
@@ -421,13 +568,15 @@
     }
 
     const paragraphs = $$(txBody, 'p')
-      .map((p) => readParagraphRich(p, themeMap))
+      .map((p) => readParagraphRich(p, themeMap, inherited))
       .filter((p) => p);
 
     if (paragraphs.length === 0) return;
 
     const bodyPr = $1(txBody, 'bodyPr');
-    const anchor = bodyPr ? (bodyPr.getAttribute('anchor') || 't') : 't';
+    let anchor = bodyPr ? bodyPr.getAttribute('anchor') : null;
+    if (!anchor && inherited) anchor = inherited.anchor;
+    if (!anchor) anchor = 't';
 
     elements.push({
       type: 'text',
@@ -670,6 +819,10 @@
 
     const rels = await readRels(zip, slidePath);
 
+    // ⭐ NOVO: lê Slide Layout e Slide Master pra herdar placeholders
+    const { layoutDoc, masterDoc } = await readLayoutAndMaster(zip, slidePath);
+    const phMap = buildPlaceholderMap(layoutDoc, masterDoc, themeMap);
+
     // Background do slide (cor sólida via <p:bg><p:bgPr><a:solidFill>)
     let bgColor = null;
     const bg = $1(doc, 'bg');
@@ -680,8 +833,23 @@
       }
     }
 
-    // ⭐ NOVO: extração ordenada de elementos posicionados
-    const elements = extractElements(doc, rels, slidePath, themeMap);
+    // Se slide não tem bg próprio, tenta herdar do layout/master
+    if (!bgColor) {
+      for (const layoutOrMaster of [layoutDoc, masterDoc]) {
+        if (!layoutOrMaster) continue;
+        const lmBg = $1(layoutOrMaster, 'bg');
+        if (lmBg) {
+          const sf = $1(lmBg, 'solidFill');
+          if (sf) {
+            bgColor = resolveColor(sf, themeMap);
+            if (bgColor) break;
+          }
+        }
+      }
+    }
+
+    // ⭐ extração de elementos COM herança de layout/master
+    const elements = extractElements(doc, rels, slidePath, themeMap, phMap);
 
     // Identificação de título: primeiro elemento de texto com isTitle=true
     let title = null;
