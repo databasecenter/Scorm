@@ -165,24 +165,35 @@ ${fileEntries}
   }
 
   // ─── PLAYER HTML ───────────────────────────────────────────────────
-  // Inclui CSP meta tag pra autorizar embed do YouTube
-  function buildPlayerHTML(parsed, opts, slideSize) {
+  // CRÍTICO: slides.json é embutido INLINE como window.__SLIDES__.
+  // Em iframe blob: (plataformas EAD), fetch('slides.json') resolve pra
+  // blob:.../slides.json e cai no early return dos hooks → loading infinito.
+  // Embutir inline elimina o fetch e funciona em qualquer ambiente.
+  function buildPlayerHTML(parsed, opts, slideSize, slidesData) {
     const title = escapeXml(opts.title || parsed.title || 'Apresentação TONOFF');
     const stageW = emuToPx(slideSize.cx);
     const stageH = emuToPx(slideSize.cy);
+
+    // Serializa slidesData de forma SEGURA dentro de <script>.
+    // Trocar </script> por <\/script> evita escape do bloco.
+    const slidesJson = JSON.stringify(slidesData)
+      .replace(/<\/(script)/gi, '<\\/$1')
+      .replace(/<!--/g, '<\\!--');
 
     return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' blob: data:; frame-src 'self' blob: data: https://www.youtube.com https://www.youtube-nocookie.com https://i.ytimg.com https://s.ytimg.com https://player.vimeo.com; img-src 'self' blob: data: https: http:; media-src 'self' blob: data: https:; connect-src 'self' blob: data:; script-src 'self' 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' blob: data:; script-src 'self' 'unsafe-inline' blob: data:; style-src 'self' 'unsafe-inline' blob: data:; frame-src 'self' blob: data: https://www.youtube.com https://www.youtube-nocookie.com https://i.ytimg.com https://s.ytimg.com https://player.vimeo.com; img-src 'self' blob: data: https: http:; media-src 'self' blob: data: https:; connect-src 'self' blob: data:;">
 <title>${title}</title>
 <link rel="stylesheet" href="player.css">
 <script>
-// Stage size injetado no HTML (em px, derivado do PPTX)
+// Stage size derivado do PPTX (em px, 96dpi)
 window.__STAGE_W__ = ${stageW};
 window.__STAGE_H__ = ${stageH};
+// Slides EMBUTIDOS — disponível antes do player.js carregar
+window.__SLIDES__ = ${slidesJson};
 </script>
 </head>
 <body>
@@ -788,22 +799,29 @@ body {
   setInterval(saveProgress, 30000);
 
   // ─── Bootstrap ───────────────────────────────────────────────────
-  fetch('slides.json')
-    .then(function (r) { return r.json(); })
-    .then(function (data) {
-      slides = data;
-      if (!slides.length) {
-        stage.innerHTML = '<div class="slide-empty">Apresentação vazia.</div>';
-        return;
-      }
+  // Lê slides EMBUTIDOS no HTML (window.__SLIDES__).
+  // Não usa fetch porque iframe blob: tem origin null e fetch falha.
+  console.log('[player] Inicializando…');
+  try {
+    const data = window.__SLIDES__;
+    if (!Array.isArray(data)) {
+      throw new Error('window.__SLIDES__ ausente ou inválido');
+    }
+    slides = data;
+    console.log('[player]', slides.length, 'slides carregados.');
+
+    if (!slides.length) {
+      stage.innerHTML = '<div class="slide-empty">Apresentação vazia.</div>';
+    } else {
       updateScale();
       const startAt = restoreProgress();
       goto(startAt);
-    })
-    .catch(function (err) {
-      console.error('Falha ao carregar slides.json:', err);
-      stage.innerHTML = '<div class="slide-empty">Erro ao carregar conteúdo.</div>';
-    });
+    }
+  } catch (err) {
+    console.error('[player] Falha ao inicializar:', err);
+    stage.innerHTML = '<div class="slide-empty">Erro ao carregar conteúdo: ' +
+      (err && err.message ? err.message : 'desconhecido') + '</div>';
+  }
 })();`;
   }
 
@@ -850,14 +868,14 @@ body {
     }
     log('ok', `${mediaList.length} arquivo(s) de mídia copiado(s).`);
 
-    // 2. slides.json
+    // 2. slides.json (também salvo como arquivo, mas o player usa o EMBUTIDO no HTML)
     log('info', 'Gerando slides.json com elementos posicionados…');
     const slidesData = buildSlidesData(parsed, mediaMap);
     zip.file('slides.json', JSON.stringify(slidesData, null, 2));
 
     // 3. Player
-    log('info', 'Gerando player SCORM (HTML/CSS/JS)…');
-    zip.file('index.html', buildPlayerHTML(parsed, opts, slideSize));
+    log('info', 'Gerando player SCORM (HTML/CSS/JS) com slides embutidos…');
+    zip.file('index.html', buildPlayerHTML(parsed, opts, slideSize, slidesData));
     zip.file('player.css', buildPlayerCSS());
     zip.file('player.js', buildPlayerJS());
 
