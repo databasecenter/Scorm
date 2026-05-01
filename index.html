@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPTX → SCORM · TONOFF Brasil EAD</title>
+<meta name="description" content="Conversor PPTX para SCORM 2004 — TONOFF Brasil EAD">
+
+<!-- Tipografia: JetBrains Mono (técnico) + IBM Plex Sans (corpo) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN TOKENS — paleta painel industrial (NR vibes)
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --bg-base:        #0A0E14;
+  --bg-panel:       #11161F;
+  --bg-elevated:    #1A2130;
+  --line:           #2A3447;
+  --line-strong:    #3D4A63;
+  --ink:            #E8EDF5;
+  --ink-dim:        #8A95AB;
+  --ink-faint:      #5A6478;
+  --safety:         #FFB800;        /* amarelo segurança / NR */
+  --safety-soft:    #FFB80020;
+  --danger:         #FF4D4D;
+  --success:        #4ADE80;
+  --info:           #60A5FA;
+
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--bg-base);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-weight: 400;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Grid de fundo blueprint */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 64px 64px;
+  opacity: 0.08;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HEADER
+   ═══════════════════════════════════════════════════════════════ */
+.header {
+  position: relative;
+  z-index: 1;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255,184,0,0.04) 0%, transparent 100%);
+}
+.header-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.brand-mark {
+  width: 44px;
+  height: 44px;
+  border: 2px solid var(--safety);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--safety);
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  background: var(--safety-soft);
+  position: relative;
+}
+.brand-mark::before, .brand-mark::after {
+  content: '';
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  background: var(--safety);
+}
+.brand-mark::before { top: -2px; left: -2px; }
+.brand-mark::after { bottom: -2px; right: -2px; }
+.brand-text { display: flex; flex-direction: column; }
+.brand-title {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.brand-subtitle {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.header-meta {
+  display: flex;
+  gap: 24px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.header-meta span strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LAYOUT
+   ═══════════════════════════════════════════════════════════════ */
+.main {
+  position: relative;
+  z-index: 1;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 56px 32px 80px;
+}
+.title-block {
+  margin-bottom: 48px;
+}
+.title-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--safety);
+  text-transform: uppercase;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.title-tag::before {
+  content: '';
+  width: 24px;
+  height: 1px;
+  background: var(--safety);
+}
+.title-main {
+  font-size: clamp(32px, 5vw, 56px);
+  font-weight: 300;
+  line-height: 1.05;
+  letter-spacing: -1px;
+  margin-bottom: 16px;
+}
+.title-main strong {
+  font-weight: 600;
+  color: var(--safety);
+}
+.title-arrow {
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+  font-weight: 400;
+  margin: 0 12px;
+}
+.title-sub {
+  font-size: 15px;
+  color: var(--ink-dim);
+  max-width: 640px;
+  line-height: 1.6;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DROPZONE
+   ═══════════════════════════════════════════════════════════════ */
+.dropzone {
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  padding: 64px 32px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  overflow: hidden;
+}
+.dropzone::before {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border: 1px dashed var(--line-strong);
+  pointer-events: none;
+  transition: all 0.25s ease;
+}
+.dropzone:hover {
+  border-color: var(--safety);
+  background: var(--bg-elevated);
+}
+.dropzone:hover::before {
+  border-color: var(--safety);
+}
+.dropzone.is-drag {
+  border-color: var(--safety);
+  background: var(--safety-soft);
+}
+.dropzone.is-drag::before {
+  border-color: var(--safety);
+  border-style: solid;
+}
+.dropzone-corner {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-color: var(--safety);
+}
+.dropzone-corner.tl { top: 0; left: 0; border-top: 2px solid; border-left: 2px solid; }
+.dropzone-corner.tr { top: 0; right: 0; border-top: 2px solid; border-right: 2px solid; }
+.dropzone-corner.bl { bottom: 0; left: 0; border-bottom: 2px solid; border-left: 2px solid; }
+.dropzone-corner.br { bottom: 0; right: 0; border-bottom: 2px solid; border-right: 2px solid; }
+
+.dropzone-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 24px;
+  border: 2px solid var(--ink-dim);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--ink-dim);
+  transition: all 0.25s ease;
+}
+.dropzone:hover .dropzone-icon {
+  border-color: var(--safety);
+  color: var(--safety);
+  transform: translateY(-2px);
+}
+.dropzone-icon svg { width: 24px; height: 24px; }
+
+.dropzone-title {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  letter-spacing: 0.5px;
+}
+.dropzone-hint {
+  font-size: 13px;
+  color: var(--ink-dim);
+  margin-bottom: 20px;
+}
+.dropzone-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: var(--safety);
+  color: var(--bg-base);
+  border: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.dropzone-btn:hover {
+  background: #FFC833;
+  transform: translateY(-1px);
+}
+.dropzone input[type=file] { display: none; }
+
+.dropzone-spec {
+  margin-top: 24px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PAINEL DE ANÁLISE (aparece após upload)
+   ═══════════════════════════════════════════════════════════════ */
+.panel {
+  margin-top: 32px;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  display: none;
+}
+.panel.is-visible { display: block; animation: panelIn 0.4s ease; }
+@keyframes panelIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elevated);
+}
+.panel-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--safety);
+  text-transform: uppercase;
+}
+.panel-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-status::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 12px var(--success);
+}
+.panel-status.is-error { color: var(--danger); }
+.panel-status.is-error::before { background: var(--danger); box-shadow: 0 0 12px var(--danger); }
+.panel-status.is-busy  { color: var(--info); }
+.panel-status.is-busy::before  { background: var(--info); box-shadow: 0 0 12px var(--info); animation: pulse 1.2s infinite; }
+@keyframes pulse {
+  50% { opacity: 0.4; }
+}
+
+.panel-body { padding: 24px; }
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+}
+.file-icon {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  background: var(--safety-soft);
+  border: 1px solid var(--safety);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--safety);
+  letter-spacing: 1px;
+}
+.file-meta { flex: 1; min-width: 0; }
+.file-name {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+.file-size {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* Stats grid */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+.stat {
+  background: var(--bg-panel);
+  padding: 20px;
+}
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 500;
+  color: var(--ink);
+  line-height: 1;
+}
+.stat-value.is-accent { color: var(--safety); }
+
+/* Log */
+.log-block {
+  margin-top: 24px;
+  background: var(--bg-base);
+  border: 1px solid var(--line);
+  padding: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.log-block::-webkit-scrollbar { width: 6px; }
+.log-block::-webkit-scrollbar-track { background: var(--bg-base); }
+.log-block::-webkit-scrollbar-thumb { background: var(--line-strong); }
+.log-line { display: flex; gap: 12px; }
+.log-time { color: var(--ink-faint); flex-shrink: 0; }
+.log-tag {
+  flex-shrink: 0;
+  width: 70px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 1px;
+  font-weight: 700;
+}
+.log-tag.info  { color: var(--info); }
+.log-tag.ok    { color: var(--success); }
+.log-tag.warn  { color: var(--safety); }
+.log-tag.err   { color: var(--danger); }
+.log-msg { color: var(--ink); }
+
+/* Botão de ação principal */
+.actions {
+  margin-top: 24px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 28px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-primary {
+  background: var(--safety);
+  color: var(--bg-base);
+}
+.btn-primary:hover { background: #FFC833; }
+.btn-primary:disabled {
+  background: var(--line-strong);
+  color: var(--ink-faint);
+  cursor: not-allowed;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+}
+.btn-ghost:hover { border-color: var(--safety); color: var(--safety); }
+
+/* ═══════════════════════════════════════════════════════════════
+   FOOTER
+   ═══════════════════════════════════════════════════════════════ */
+.footer {
+  position: relative;
+  z-index: 1;
+  border-top: 1px solid var(--line);
+  padding: 24px 32px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+}
+.footer strong { color: var(--ink-dim); font-weight: 500; }
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVO
+   ═══════════════════════════════════════════════════════════════ */
+@media (max-width: 640px) {
+  .header-inner { padding: 20px; }
+  .header-meta { display: none; }
+  .main { padding: 32px 20px 60px; }
+  .dropzone { padding: 40px 20px; }
+}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-mark">SC</div>
+      <div class="brand-text">
+        <span class="brand-title">PPTX // SCORM</span>
+        <span class="brand-subtitle">TONOFF Brasil EAD · Converter v0.1</span>
+      </div>
+    </div>
+    <div class="header-meta">
+      <span>SPEC <strong>SCORM 2004 4ed</strong></span>
+      <span>RUNTIME <strong>BROWSER · NO SERVER</strong></span>
+    </div>
+  </div>
+</header>
+
+<main class="main">
+
+  <div class="title-block">
+    <div class="title-tag">01 // Upload do arquivo</div>
+    <h1 class="title-main">
+      Converta PPTX
+      <span class="title-arrow">─►</span>
+      em <strong>SCORM</strong> sem licença
+    </h1>
+    <p class="title-sub">
+      Conversor 100% client-side. Seu arquivo nunca sai do navegador.
+      Compatível com a plataforma TONOFF, SCORM Cloud, Moodle e Blackboard.
+    </p>
+  </div>
+
+  <!-- ─── Dropzone ─────────────────────────────────────────────── -->
+  <label class="dropzone" id="dropzone" for="fileInput">
+    <span class="dropzone-corner tl"></span>
+    <span class="dropzone-corner tr"></span>
+    <span class="dropzone-corner bl"></span>
+    <span class="dropzone-corner br"></span>
+
+    <div class="dropzone-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12"/>
+        <path d="m7 8 5-5 5 5"/>
+        <path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/>
+      </svg>
+    </div>
+
+    <div class="dropzone-title">Arraste seu .pptx aqui</div>
+    <div class="dropzone-hint">ou clique para selecionar do computador</div>
+
+    <span class="dropzone-btn">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+      </svg>
+      Selecionar arquivo
+    </span>
+
+    <div class="dropzone-spec">.PPTX · MAX 100MB · 100% LOCAL</div>
+
+    <input type="file" id="fileInput" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+  </label>
+
+  <!-- ─── Painel de análise (aparece após upload) ──────────────── -->
+  <section class="panel" id="panel">
+    <div class="panel-header">
+      <span class="panel-id">// 02 · ANÁLISE DO ARQUIVO</span>
+      <span class="panel-status" id="panelStatus">PRONTO</span>
+    </div>
+    <div class="panel-body">
+
+      <div class="file-row">
+        <div class="file-icon">PPTX</div>
+        <div class="file-meta">
+          <div class="file-name" id="fileName">—</div>
+          <div class="file-size" id="fileSize">—</div>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-label">Slides detectados</div>
+          <div class="stat-value is-accent" id="statSlides">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Imagens</div>
+          <div class="stat-value" id="statImages">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Mídias / vídeos</div>
+          <div class="stat-value" id="statMedia">—</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Tamanho original</div>
+          <div class="stat-value" id="statSize">—</div>
+        </div>
+      </div>
+
+      <div class="log-block" id="logBlock"></div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="btnConvert" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m9 18 6-6-6-6"/>
+          </svg>
+          Gerar SCORM
+        </button>
+        <button class="btn btn-ghost" id="btnReset">
+          Trocar arquivo
+        </button>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  TONOFF TREINAMENTOS LTDA · Macaé/RJ · <strong>CNPJ 45.776.667/0001-19</strong>
+</footer>
+
+<!-- JSZip via CDN (lê e gera ZIP no navegador) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"
+        integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+<!-- Módulos do conversor (carregados em ordem) -->
+<script src="pptx-parser.js"></script>
+<script src="scorm-generator.js"></script>
+<script src="converter.js"></script>
+
+</body>
+</html>
